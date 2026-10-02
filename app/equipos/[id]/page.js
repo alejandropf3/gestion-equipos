@@ -1,6 +1,5 @@
 "use client"; // Este componente corre en el navegador
  
-// Importamos los hooks necesarios
 import { useEffect, useState, use } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
@@ -8,25 +7,28 @@ import { supabase } from "@/lib/supabase";
 export default function InspeccionEquipo({ params: paramsPromise }) {
   const router = useRouter();
   const params = use(paramsPromise); // Desenvolver params que en Next.js 15 es una promesa
-  const { id } = params; // ID del equipo obtenido de la URL
+  const { id } = params;
  
   // --- ESTADOS ---
-  const [equipo, setEquipo] = useState(null);           // Datos del equipo
-  const [ingresos, setIngresos] = useState([]);          // Historial de ingresos
-  const [salidas, setSalidas] = useState([]);            // Historial de salidas
-  const [perifericos, setPerifericos] = useState([]);    // Perifericos vinculados
-  const [hostnames, setHostnames] = useState([]);        // Historial de hostnames
-  const [mantenimientos, setMantenimientos] = useState([]); // Mantenimientos del equipo
+  const [equipo, setEquipo] = useState(null);
+  const [ingresos, setIngresos] = useState([]);
+  const [salidas, setSalidas] = useState([]);
+  const [perifericos, setPerifericos] = useState([]);
+  const [hostnames, setHostnames] = useState([]);
+  const [mantenimientos, setMantenimientos] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
  
-  // Estados para el modal de confirmacion de eliminacion
+  // Estado para el modal de confirmacion de eliminacion
   const [mostrarEliminar, setMostrarEliminar] = useState(false);
   const [segundos, setSegundos] = useState(10);
   const [puedeEliminar, setPuedeEliminar] = useState(false);
  
+  // Estado para confirmar desvinculacion de periferico
+  const [perifericoADesvincular, setPerifericoADesvincular] = useState(null);
+ 
   // Tab activo en la inspeccion profunda
-  const [tab, setTab] = useState("info"); // "info" | "ingresos" | "salidas" | "mantenimiento"
+  const [tab, setTab] = useState("info");
  
   // --- CARGA DE DATOS ---
   useEffect(() => {
@@ -36,7 +38,6 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
   async function cargarDatos() {
     setLoading(true);
  
-    // Cargamos el equipo principal
     const { data: equipoData, error: errorEquipo } = await supabase
       .from("equipos")
       .select("*")
@@ -49,34 +50,29 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
       return;
     }
  
-    // Cargamos el historial de ingresos con sus perifericos
     const { data: ingresosData } = await supabase
       .from("registros_ingreso")
       .select("*, ingreso_perifericos(*)")
       .eq("equipo_id", id)
       .order("created_at", { ascending: false });
  
-    // Cargamos el historial de salidas con sus perifericos
     const { data: salidasData } = await supabase
       .from("registros_salida")
       .select("*, salida_perifericos(*)")
       .eq("equipo_id", id)
       .order("created_at", { ascending: false });
  
-    // Cargamos los perifericos actualmente vinculados al equipo
     const { data: perifericosData } = await supabase
       .from("perifericos")
       .select("*")
       .eq("equipo_id", id);
  
-    // Cargamos el historial de hostnames
     const { data: hostnamesData } = await supabase
       .from("hostname_historial")
       .select("*")
       .eq("equipo_id", id)
       .order("fecha_desde", { ascending: false });
  
-    // Cargamos el historial de mantenimientos
     const { data: mantenimientosData } = await supabase
       .from("mantenimientos")
       .select("*")
@@ -93,11 +89,8 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
   }
  
   // --- COUNTDOWN PARA ELIMINAR ---
-  // Cuando se abre el modal de eliminacion, inicia una cuenta regresiva de 10 segundos
   useEffect(() => {
     if (!mostrarEliminar) return;
- 
-    // Reiniciamos el contador cada vez que se abre el modal
     setSegundos(10);
     setPuedeEliminar(false);
  
@@ -105,14 +98,13 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
       setSegundos((prev) => {
         if (prev <= 1) {
           clearInterval(intervalo);
-          setPuedeEliminar(true); // Habilita el boton de eliminar
+          setPuedeEliminar(true);
           return 0;
         }
         return prev - 1;
       });
     }, 1000);
  
-    // Limpiamos el intervalo si el modal se cierra antes
     return () => clearInterval(intervalo);
   }, [mostrarEliminar]);
  
@@ -123,7 +115,34 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
       setError("Error al eliminar el equipo: " + error.message);
       return;
     }
-    router.push("/"); // Redirigimos al listado despues de eliminar
+    router.push("/");
+  }
+ 
+  // --- DESVINCULAR PERIFERICO ---
+  // Quita la vinculacion del periferico con este equipo
+  // El periferico sigue existiendo en la base de datos pero sin equipo asignado
+  async function desvincularPeriferico(perifericoId) {
+    const { error } = await supabase
+      .from("perifericos")
+      .update({ equipo_id: null })
+      .eq("id", perifericoId);
+ 
+    if (error) {
+      setError("Error al desvincular el periferico: " + error.message);
+      return;
+    }
+ 
+    // Registramos el evento en el historial del periferico
+    await supabase.from("periferico_historial").insert([{
+      periferico_id: perifericoId,
+      equipo_id: null,
+      fecha_desde: new Date().toISOString(),
+      motivo: "Desvinculacion",
+    }]);
+ 
+    // Actualizamos la lista local sin recargar toda la pagina
+    setPerifericos((prev) => prev.filter((p) => p.id !== perifericoId));
+    setPerifericoADesvincular(null); // Cerramos el modal de confirmacion
   }
  
   // --- COLORES DE ESTADO ---
@@ -137,15 +156,17 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
   };
  
   // --- FORMATO DE FECHA ---
+  // Corregimos el problema de zona horaria UTC agregando T00:00:00 a fechas sin hora
   const formatFecha = (fecha) => {
     if (!fecha) return "-";
-    return new Date(fecha).toLocaleDateString("es-CO", {
+    const fechaCorregida = fecha.includes("T") ? fecha : fecha + "T00:00:00";
+    return new Date(fechaCorregida).toLocaleDateString("es-CO", {
       year: "numeric", month: "long", day: "numeric"
     });
   };
  
   if (loading) return <div className="text-center py-20 text-gray-400">Cargando...</div>;
-  if (error) return <div className="text-center py-20 text-red-500">{error}</div>;
+  if (error && !equipo) return <div className="text-center py-20 text-red-500">{error}</div>;
   if (!equipo) return null;
  
   const esMovil = equipo.tipo === "Celular" || equipo.tipo === "Tablet";
@@ -153,7 +174,7 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
   return (
     <div className="max-w-4xl mx-auto">
  
-      {/* ENCABEZADO con navegacion y acciones */}
+      {/* ENCABEZADO */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
         <div>
           <a href="/" className="text-blue-600 hover:underline text-sm">
@@ -165,24 +186,18 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
           <p className="text-gray-500 text-sm font-mono mt-1">{equipo.serial}</p>
         </div>
  
-        {/* Botones de accion: editar, registrar salida y eliminar */}
+        {/* Botones de accion */}
         <div className="flex gap-2 flex-wrap">
-          <a
-            href={`/equipos/${id}/editar`}
-            className="px-4 py-2 rounded-lg border border-gray-300 text-gray-700 text-sm font-medium hover:bg-gray-50 transition-colors"
-          >
+          <a href={`/equipos/${id}/editar`}
+            className="px-4 py-2 rounded-lg border border-gray-300 text-gray-700 text-sm font-medium hover:bg-gray-50 transition-colors">
             ✏️ Editar
           </a>
-          <a
-            href={`/equipos/${id}/salida`}
-            className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium transition-colors"
-          >
+          <a href={`/equipos/${id}/salida`}
+            className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium transition-colors">
             📤 Registrar salida
           </a>
-          <button
-            onClick={() => setMostrarEliminar(true)}
-            className="px-4 py-2 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 text-sm font-medium transition-colors"
-          >
+          <button onClick={() => setMostrarEliminar(true)}
+            className="px-4 py-2 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 text-sm font-medium transition-colors">
             🗑 Eliminar
           </button>
         </div>
@@ -217,25 +232,20 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
           { key: "salidas", label: "📤 Salidas" },
           { key: "mantenimiento", label: "🔧 Mantenimiento" },
         ].map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setTab(t.key)}
+          <button key={t.key} onClick={() => setTab(t.key)}
             className={`flex-1 py-2 px-3 rounded-lg text-sm font-medium transition-colors ${
-              tab === t.key
-                ? "bg-white shadow-sm text-blue-600"
-                : "text-gray-600 hover:text-gray-800"
-            }`}
-          >
+              tab === t.key ? "bg-white shadow-sm text-blue-600" : "text-gray-600 hover:text-gray-800"
+            }`}>
             {t.label}
           </button>
         ))}
       </div>
  
-      {/* TAB: INFORMACION COMPLETA DEL EQUIPO */}
+      {/* TAB: INFORMACION COMPLETA */}
       {tab === "info" && (
         <div className="space-y-6">
  
-          {/* Datos generales */}
+          {/* Datos generales del equipo */}
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
             <h3 className="font-semibold text-gray-700 mb-4 pb-2 border-b border-gray-100">
               Datos del equipo
@@ -288,7 +298,7 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
             </div>
           )}
  
-          {/* Perifericos vinculados actualmente */}
+          {/* Perifericos vinculados con opcion de desvincular */}
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
             <h3 className="font-semibold text-gray-700 mb-4 pb-2 border-b border-gray-100">
               Perifericos vinculados
@@ -298,10 +308,19 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {perifericos.map((p) => (
-                  <div key={p.id} className="border border-gray-200 rounded-lg p-3">
-                    <p className="text-xs text-purple-600 font-semibold mb-1">{p.tipo}</p>
-                    <p className="text-sm font-medium text-gray-800">{p.marca} {p.modelo || ""}</p>
-                    <p className="text-xs text-gray-400 font-mono">{p.serial || "Sin serial"}</p>
+                  <div key={p.id} className="border border-gray-200 rounded-lg p-3 flex items-start justify-between gap-2">
+                    <div>
+                      <p className="text-xs text-purple-600 font-semibold mb-1">{p.tipo}</p>
+                      <p className="text-sm font-medium text-gray-800">{p.marca} {p.modelo || ""}</p>
+                      <p className="text-xs text-gray-400 font-mono">{p.serial || "Sin serial"}</p>
+                    </div>
+                    {/* Boton para iniciar la desvinculacion del periferico */}
+                    <button
+                      onClick={() => setPerifericoADesvincular(p)}
+                      className="text-xs text-red-400 hover:text-red-600 whitespace-nowrap mt-1 transition-colors"
+                    >
+                      Desvincular
+                    </button>
                   </div>
                 ))}
               </div>
@@ -343,9 +362,7 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
             ingresos.map((ingreso, index) => (
               <div key={ingreso.id} className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
                 <div className="flex items-center justify-between mb-4">
-                  <h3 className="font-semibold text-gray-700">
-                    Ingreso #{ingresos.length - index}
-                  </h3>
+                  <h3 className="font-semibold text-gray-700">Ingreso #{ingresos.length - index}</h3>
                   <span className="text-xs text-gray-400">{formatFecha(ingreso.fecha_recepcion)}</span>
                 </div>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-4">
@@ -363,8 +380,6 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
                     </div>
                   ))}
                 </div>
- 
-                {/* Perifericos incluidos en este ingreso */}
                 {ingreso.ingreso_perifericos?.length > 0 && (
                   <div className="border-t border-gray-100 pt-4">
                     <p className="text-xs font-semibold text-gray-500 mb-2">Perifericos en este ingreso:</p>
@@ -395,12 +410,9 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
             salidas.map((salida, index) => (
               <div key={salida.id} className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
                 <div className="flex items-center justify-between mb-4">
-                  <h3 className="font-semibold text-gray-700">
-                    Salida #{salidas.length - index}
-                  </h3>
+                  <h3 className="font-semibold text-gray-700">Salida #{salidas.length - index}</h3>
                   <span className="text-xs text-gray-400">{formatFecha(salida.fecha_entrega)}</span>
                 </div>
- 
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 mb-4">
                   {[
                     { label: "Usuario", value: salida.usuario_nombre },
@@ -420,7 +432,6 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
                   ))}
                 </div>
  
-                {/* Perifericos incluidos en esta salida */}
                 {salida.salida_perifericos?.length > 0 && (
                   <div className="border-t border-gray-100 pt-4 mb-4">
                     <p className="text-xs font-semibold text-gray-500 mb-2">Perifericos en esta salida:</p>
@@ -434,25 +445,19 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
                   </div>
                 )}
  
-                {/* Documentos generados: acta y carta de autorizacion */}
+                {/* Botones de descarga de documentos */}
                 <div className="border-t border-gray-100 pt-4 flex gap-3 flex-wrap">
                   {salida.url_acta_entrega ? (
-                    <a
-                      href={salida.url_acta_entrega}
-                      download
-                      className="flex items-center gap-2 text-sm bg-green-50 hover:bg-green-100 text-green-700 px-3 py-2 rounded-lg transition-colors"
-                    >
+                    <a href={salida.url_acta_entrega} download
+                      className="flex items-center gap-2 text-sm bg-green-50 hover:bg-green-100 text-green-700 px-3 py-2 rounded-lg transition-colors">
                       ⬇ Descargar acta de entrega
                     </a>
                   ) : (
                     <span className="text-xs text-gray-400">Sin acta de entrega</span>
                   )}
                   {salida.url_carta_autorizacion ? (
-                    <a
-                      href={salida.url_carta_autorizacion}
-                      download
-                      className="flex items-center gap-2 text-sm bg-blue-50 hover:bg-blue-100 text-blue-700 px-3 py-2 rounded-lg transition-colors"
-                    >
+                    <a href={salida.url_carta_autorizacion} download
+                      className="flex items-center gap-2 text-sm bg-blue-50 hover:bg-blue-100 text-blue-700 px-3 py-2 rounded-lg transition-colors">
                       ⬇ Descargar carta de autorizacion
                     </a>
                   ) : (
@@ -469,10 +474,8 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
       {tab === "mantenimiento" && (
         <div className="space-y-4">
           <div className="flex justify-end mb-2">
-            <a
-              href={`/equipos/${id}/mantenimiento`}
-              className="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
-            >
+            <a href={`/equipos/${id}/mantenimiento`}
+              className="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
               + Registrar mantenimiento
             </a>
           </div>
@@ -489,7 +492,9 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
                     <span className="text-xs font-semibold px-2 py-1 rounded-full bg-orange-100 text-orange-700">
                       {m.tipo}
                     </span>
-                    <p className="font-semibold text-gray-800 mt-2">Mantenimiento #{mantenimientos.length - index}</p>
+                    <p className="font-semibold text-gray-800 mt-2">
+                      Mantenimiento #{mantenimientos.length - index}
+                    </p>
                   </div>
                   <span className="text-xs text-gray-400">{formatFecha(m.fecha_inicio)}</span>
                 </div>
@@ -519,18 +524,12 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
  
       {/* MODAL DE CONFIRMACION DE ELIMINACION */}
       {mostrarEliminar && (
-        // Fondo oscuro detras del modal
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-xl shadow-xl p-6 max-w-md w-full">
-            <h3 className="text-lg font-bold text-gray-800 mb-2">
-              ¿Eliminar este equipo?
-            </h3>
+            <h3 className="text-lg font-bold text-gray-800 mb-2">¿Eliminar este equipo?</h3>
             <p className="text-sm text-gray-500 mb-6">
-              Esta accion es permanente y eliminara el equipo junto con todo su historial.
-              No se puede deshacer.
+              Esta accion es permanente y eliminara el equipo junto con todo su historial. No se puede deshacer.
             </p>
- 
-            {/* Cuenta regresiva antes de poder eliminar */}
             {!puedeEliminar && (
               <div className="bg-red-50 rounded-lg p-4 mb-4 text-center">
                 <p className="text-sm text-red-600">
@@ -539,23 +538,50 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
                 </p>
               </div>
             )}
- 
             <div className="flex gap-3 justify-end">
-              {/* Boton cancelar: cierra el modal */}
-              <button
-                onClick={() => setMostrarEliminar(false)}
-                className="px-4 py-2 rounded-lg border border-gray-300 text-gray-700 text-sm font-medium hover:bg-gray-50"
-              >
+              <button onClick={() => setMostrarEliminar(false)}
+                className="px-4 py-2 rounded-lg border border-gray-300 text-gray-700 text-sm font-medium hover:bg-gray-50">
                 Cancelar
               </button>
- 
-              {/* Boton eliminar: deshabilitado hasta que pasen los 10 segundos */}
-              <button
-                onClick={eliminarEquipo}
-                disabled={!puedeEliminar}
-                className="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-              >
+              <button onClick={eliminarEquipo} disabled={!puedeEliminar}
+                className="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
                 Eliminar equipo
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+ 
+      {/* MODAL DE CONFIRMACION DE DESVINCULACION DE PERIFERICO */}
+      {perifericoADesvincular && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl p-6 max-w-md w-full">
+            <h3 className="text-lg font-bold text-gray-800 mb-2">¿Desvincular periferico?</h3>
+            <p className="text-sm text-gray-500 mb-4">
+              Vas a desvincular el siguiente periferico de este equipo:
+            </p>
+            {/* Resumen del periferico que se va a desvincular */}
+            <div className="bg-purple-50 rounded-lg p-3 mb-6">
+              <p className="text-xs text-purple-500 font-semibold">{perifericoADesvincular.tipo}</p>
+              <p className="font-medium text-purple-800">
+                {perifericoADesvincular.marca} {perifericoADesvincular.modelo || ""}
+              </p>
+              <p className="text-xs text-purple-400 font-mono">
+                {perifericoADesvincular.serial || "Sin serial"}
+              </p>
+            </div>
+            <p className="text-xs text-gray-400 mb-6">
+              El periferico seguira existiendo en el inventario pero sin equipo asignado.
+              Podras vincularlo a otro equipo en cualquier momento.
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button onClick={() => setPerifericoADesvincular(null)}
+                className="px-4 py-2 rounded-lg border border-gray-300 text-gray-700 text-sm font-medium hover:bg-gray-50">
+                Cancelar
+              </button>
+              <button onClick={() => desvincularPeriferico(perifericoADesvincular.id)}
+                className="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white text-sm font-medium transition-colors">
+                Desvincular
               </button>
             </div>
           </div>
@@ -564,3 +590,4 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
     </div>
   );
 }
+ 
