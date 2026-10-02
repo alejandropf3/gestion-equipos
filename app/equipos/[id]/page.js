@@ -192,10 +192,18 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
             className="px-4 py-2 rounded-lg border border-gray-300 text-gray-700 text-sm font-medium hover:bg-gray-50 transition-colors">
             ✏️ Editar
           </a>
-          <a href={`/equipos/${id}/salida`}
-            className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium transition-colors">
-            📤 Registrar salida
-          </a>
+          {/* Muestra salida si esta En reserva, reingreso si esta Entregado o Prestado */}
+          {equipo.estado === "En reserva" ? (
+            <a href={`/equipos/${id}/salida`}
+              className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium transition-colors">
+              📤 Registrar salida
+            </a>
+          ) : (
+            <a href={`/equipos/${id}/reingreso`}
+              className="px-4 py-2 rounded-lg bg-green-600 hover:bg-green-700 text-white text-sm font-medium transition-colors">
+              📥 Registrar reingreso
+            </a>
+          )}
           <button onClick={() => setMostrarEliminar(true)}
             className="px-4 py-2 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 text-sm font-medium transition-colors">
             🗑 Eliminar
