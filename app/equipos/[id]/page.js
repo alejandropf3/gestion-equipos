@@ -19,15 +19,20 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
  
-  // Estado para el modal de confirmacion de eliminacion
+  // Estado para el modal de eliminacion
   const [mostrarEliminar, setMostrarEliminar] = useState(false);
   const [segundos, setSegundos] = useState(10);
   const [puedeEliminar, setPuedeEliminar] = useState(false);
  
-  // Estado para confirmar desvinculacion de periferico
+  // Estado para el modal de desvinculacion de periferico
   const [perifericoADesvincular, setPerifericoADesvincular] = useState(null);
  
-  // Tab activo en la inspeccion profunda
+  // Estado para el modal de vinculacion de periferico existente
+  const [mostrarVincular, setMostrarVincular] = useState(false);
+  const [perifericosDisponibles, setPerifericosDisponibles] = useState([]); // Perifericos sin equipo asignado
+  const [busquedaPeriferico, setBusquedaPeriferico] = useState("");
+ 
+  // Tab activo
   const [tab, setTab] = useState("info");
  
   // --- CARGA DE DATOS ---
@@ -88,6 +93,67 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
     setLoading(false);
   }
  
+  // --- CARGAR PERIFERICOS DISPONIBLES PARA VINCULAR ---
+  // Trae todos los perifericos que no tienen equipo asignado (equipo_id IS NULL)
+  async function cargarPerifericosDisponibles() {
+    const { data } = await supabase
+      .from("perifericos")
+      .select("*")
+      .is("equipo_id", null);
+    setPerifericosDisponibles(data || []);
+    setMostrarVincular(true);
+  }
+ 
+  // --- VINCULAR PERIFERICO EXISTENTE ---
+  async function vincularPeriferico(periferico) {
+    const { error } = await supabase
+      .from("perifericos")
+      .update({ equipo_id: id })
+      .eq("id", periferico.id);
+ 
+    if (error) {
+      setError("Error al vincular el periferico: " + error.message);
+      return;
+    }
+ 
+    // Registramos en el historial del periferico
+    await supabase.from("periferico_historial").insert([{
+      periferico_id: periferico.id,
+      equipo_id: id,
+      fecha_desde: new Date().toISOString(),
+      motivo: "Vinculacion",
+    }]);
+ 
+    // Actualizamos la lista local agregando el periferico vinculado
+    setPerifericos((prev) => [...prev, { ...periferico, equipo_id: id }]);
+    setMostrarVincular(false);
+    setBusquedaPeriferico("");
+  }
+ 
+  // --- DESVINCULAR PERIFERICO ---
+  async function desvincularPeriferico(perifericoId) {
+    const { error } = await supabase
+      .from("perifericos")
+      .update({ equipo_id: null })
+      .eq("id", perifericoId);
+ 
+    if (error) {
+      setError("Error al desvincular el periferico: " + error.message);
+      return;
+    }
+ 
+    // Registramos en el historial
+    await supabase.from("periferico_historial").insert([{
+      periferico_id: perifericoId,
+      equipo_id: null,
+      fecha_desde: new Date().toISOString(),
+      motivo: "Desvinculacion",
+    }]);
+ 
+    setPerifericos((prev) => prev.filter((p) => p.id !== perifericoId));
+    setPerifericoADesvincular(null);
+  }
+ 
   // --- COUNTDOWN PARA ELIMINAR ---
   useEffect(() => {
     if (!mostrarEliminar) return;
@@ -118,33 +184,6 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
     router.push("/");
   }
  
-  // --- DESVINCULAR PERIFERICO ---
-  // Quita la vinculacion del periferico con este equipo
-  // El periferico sigue existiendo en la base de datos pero sin equipo asignado
-  async function desvincularPeriferico(perifericoId) {
-    const { error } = await supabase
-      .from("perifericos")
-      .update({ equipo_id: null })
-      .eq("id", perifericoId);
- 
-    if (error) {
-      setError("Error al desvincular el periferico: " + error.message);
-      return;
-    }
- 
-    // Registramos el evento en el historial del periferico
-    await supabase.from("periferico_historial").insert([{
-      periferico_id: perifericoId,
-      equipo_id: null,
-      fecha_desde: new Date().toISOString(),
-      motivo: "Desvinculacion",
-    }]);
- 
-    // Actualizamos la lista local sin recargar toda la pagina
-    setPerifericos((prev) => prev.filter((p) => p.id !== perifericoId));
-    setPerifericoADesvincular(null); // Cerramos el modal de confirmacion
-  }
- 
   // --- COLORES DE ESTADO ---
   const colorEstado = (estado) => {
     switch (estado) {
@@ -156,7 +195,6 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
   };
  
   // --- FORMATO DE FECHA ---
-  // Corregimos el problema de zona horaria UTC agregando T00:00:00 a fechas sin hora
   const formatFecha = (fecha) => {
     if (!fecha) return "-";
     const fechaCorregida = fecha.includes("T") ? fecha : fecha + "T00:00:00";
@@ -164,6 +202,17 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
       year: "numeric", month: "long", day: "numeric"
     });
   };
+ 
+  // Filtramos los perifericos disponibles segun la busqueda
+  const perifericosDisponiblesFiltrados = perifericosDisponibles.filter((p) => {
+    const texto = busquedaPeriferico.toLowerCase();
+    return (
+      p.tipo?.toLowerCase().includes(texto) ||
+      p.marca?.toLowerCase().includes(texto) ||
+      p.modelo?.toLowerCase().includes(texto) ||
+      p.serial?.toLowerCase().includes(texto)
+    );
+  });
  
   if (loading) return <div className="text-center py-20 text-gray-400">Cargando...</div>;
   if (error && !equipo) return <div className="text-center py-20 text-red-500">{error}</div>;
@@ -192,6 +241,7 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
             className="px-4 py-2 rounded-lg border border-gray-300 text-gray-700 text-sm font-medium hover:bg-gray-50 transition-colors">
             ✏️ Editar
           </a>
+ 
           {/* Muestra salida si esta En reserva, reingreso si esta Entregado o Prestado */}
           {equipo.estado === "En reserva" ? (
             <a href={`/equipos/${id}/salida`}
@@ -204,6 +254,7 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
               📥 Registrar reingreso
             </a>
           )}
+ 
           <button onClick={() => setMostrarEliminar(true)}
             className="px-4 py-2 rounded-lg bg-red-50 hover:bg-red-100 text-red-600 text-sm font-medium transition-colors">
             🗑 Eliminar
@@ -223,7 +274,7 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
           </div>
           <div className="flex items-center gap-2 text-sm text-gray-600">
             <span>👤</span>
-            <span>{equipo.usuario_actual || "Sin usuario asignado"}</span>
+            <span>{equipo.usuario_actual || "Sin usuario"}</span>
           </div>
           <div className="flex items-center gap-2 text-sm text-gray-600">
             <span>📅</span>
@@ -253,7 +304,7 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
       {tab === "info" && (
         <div className="space-y-6">
  
-          {/* Datos generales del equipo */}
+          {/* Datos generales */}
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
             <h3 className="font-semibold text-gray-700 mb-4 pb-2 border-b border-gray-100">
               Datos del equipo
@@ -286,7 +337,7 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
             </div>
           </div>
  
-          {/* Historial de hostnames - solo visible en inspeccion profunda */}
+          {/* Historial de hostnames */}
           {!esMovil && hostnames.length > 0 && (
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
               <h3 className="font-semibold text-gray-700 mb-4 pb-2 border-b border-gray-100">
@@ -306,11 +357,18 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
             </div>
           )}
  
-          {/* Perifericos vinculados con opcion de desvincular */}
+          {/* Perifericos vinculados con opciones de vincular y desvincular */}
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-            <h3 className="font-semibold text-gray-700 mb-4 pb-2 border-b border-gray-100">
-              Perifericos vinculados
-            </h3>
+            <div className="flex items-center justify-between mb-4 pb-2 border-b border-gray-100">
+              <h3 className="font-semibold text-gray-700">Perifericos vinculados</h3>
+              {/* Boton para abrir el modal de vincular periferico existente */}
+              <button
+                onClick={cargarPerifericosDisponibles}
+                className="text-sm bg-blue-50 hover:bg-blue-100 text-blue-600 font-medium px-3 py-1.5 rounded-lg transition-colors"
+              >
+                + Vincular periferico
+              </button>
+            </div>
             {perifericos.length === 0 ? (
               <p className="text-sm text-gray-400">No hay perifericos vinculados actualmente.</p>
             ) : (
@@ -322,7 +380,6 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
                       <p className="text-sm font-medium text-gray-800">{p.marca} {p.modelo || ""}</p>
                       <p className="text-xs text-gray-400 font-mono">{p.serial || "Sin serial"}</p>
                     </div>
-                    {/* Boton para iniciar la desvinculacion del periferico */}
                     <button
                       onClick={() => setPerifericoADesvincular(p)}
                       className="text-xs text-red-400 hover:text-red-600 whitespace-nowrap mt-1 transition-colors"
@@ -378,7 +435,7 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
                     { label: "Recibido por", value: ingreso.recibido_por },
                     { label: "Ciudad", value: ingreso.ciudad_recepcion },
                     { label: "Hostname", value: ingreso.hostname || "-" },
-                    { label: "Responsable", value: ingreso.propietario_nombre || "-" },
+                    { label: "Devuelto por", value: ingreso.propietario_nombre || "-" },
                     { label: "Cedula", value: ingreso.propietario_cedula || "-" },
                     { label: "Correo", value: ingreso.propietario_correo || "-" },
                   ].map((item) => (
@@ -388,8 +445,14 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
                     </div>
                   ))}
                 </div>
+                {ingreso.observaciones && (
+                  <div className="border-t border-gray-100 pt-3">
+                    <p className="text-xs text-gray-400 mb-1">Observaciones</p>
+                    <p className="text-sm text-gray-700">{ingreso.observaciones}</p>
+                  </div>
+                )}
                 {ingreso.ingreso_perifericos?.length > 0 && (
-                  <div className="border-t border-gray-100 pt-4">
+                  <div className="border-t border-gray-100 pt-4 mt-3">
                     <p className="text-xs font-semibold text-gray-500 mb-2">Perifericos en este ingreso:</p>
                     <div className="flex flex-wrap gap-2">
                       {ingreso.ingreso_perifericos.map((p) => (
@@ -439,7 +502,12 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
                     </div>
                   ))}
                 </div>
- 
+                {salida.observaciones && (
+                  <div className="border-t border-gray-100 pt-3 mb-3">
+                    <p className="text-xs text-gray-400 mb-1">Observaciones</p>
+                    <p className="text-sm text-gray-700">{salida.observaciones}</p>
+                  </div>
+                )}
                 {salida.salida_perifericos?.length > 0 && (
                   <div className="border-t border-gray-100 pt-4 mb-4">
                     <p className="text-xs font-semibold text-gray-500 mb-2">Perifericos en esta salida:</p>
@@ -452,7 +520,6 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
                     </div>
                   </div>
                 )}
- 
                 {/* Botones de descarga de documentos */}
                 <div className="border-t border-gray-100 pt-4 flex gap-3 flex-wrap">
                   {salida.url_acta_entrega ? (
@@ -530,7 +597,7 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
         </div>
       )}
  
-      {/* MODAL DE CONFIRMACION DE ELIMINACION */}
+      {/* MODAL DE ELIMINACION */}
       {mostrarEliminar && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-xl shadow-xl p-6 max-w-md w-full">
@@ -560,7 +627,7 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
         </div>
       )}
  
-      {/* MODAL DE CONFIRMACION DE DESVINCULACION DE PERIFERICO */}
+      {/* MODAL DE DESVINCULACION DE PERIFERICO */}
       {perifericoADesvincular && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-xl shadow-xl p-6 max-w-md w-full">
@@ -568,7 +635,6 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
             <p className="text-sm text-gray-500 mb-4">
               Vas a desvincular el siguiente periferico de este equipo:
             </p>
-            {/* Resumen del periferico que se va a desvincular */}
             <div className="bg-purple-50 rounded-lg p-3 mb-6">
               <p className="text-xs text-purple-500 font-semibold">{perifericoADesvincular.tipo}</p>
               <p className="font-medium text-purple-800">
@@ -580,7 +646,6 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
             </div>
             <p className="text-xs text-gray-400 mb-6">
               El periferico seguira existiendo en el inventario pero sin equipo asignado.
-              Podras vincularlo a otro equipo en cualquier momento.
             </p>
             <div className="flex gap-3 justify-end">
               <button onClick={() => setPerifericoADesvincular(null)}
@@ -595,7 +660,67 @@ export default function InspeccionEquipo({ params: paramsPromise }) {
           </div>
         </div>
       )}
+ 
+      {/* MODAL DE VINCULACION DE PERIFERICO EXISTENTE */}
+      {mostrarVincular && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-xl shadow-xl p-6 max-w-lg w-full">
+            <h3 className="text-lg font-bold text-gray-800 mb-2">Vincular periferico existente</h3>
+            <p className="text-sm text-gray-500 mb-4">
+              Selecciona un periferico del inventario para vincularlo a este equipo.
+            </p>
+ 
+            {/* Buscador de perifericos disponibles */}
+            <input
+              type="text"
+              placeholder="Buscar por tipo, marca, modelo o serial..."
+              value={busquedaPeriferico}
+              onChange={(e) => setBusquedaPeriferico(e.target.value)}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 mb-4"
+            />
+ 
+            {/* Lista de perifericos disponibles */}
+            <div className="max-h-72 overflow-y-auto space-y-2">
+              {perifericosDisponiblesFiltrados.length === 0 ? (
+                <div className="text-center py-8 text-gray-400">
+                  <p className="text-2xl mb-2">🖱</p>
+                  <p className="text-sm">
+                    {perifericosDisponibles.length === 0
+                      ? "No hay perifericos disponibles sin equipo asignado"
+                      : "No se encontraron perifericos con esa busqueda"}
+                  </p>
+                </div>
+              ) : (
+                perifericosDisponiblesFiltrados.map((p) => (
+                  <div key={p.id}
+                    className="flex items-center justify-between border border-gray-200 rounded-lg p-3 hover:border-blue-300 hover:bg-blue-50 transition-colors">
+                    <div>
+                      <p className="text-xs text-purple-600 font-semibold">{p.tipo}</p>
+                      <p className="text-sm font-medium text-gray-800">{p.marca} {p.modelo || ""}</p>
+                      <p className="text-xs text-gray-400 font-mono">{p.serial || "Sin serial"}</p>
+                    </div>
+                    {/* Boton para vincular este periferico al equipo actual */}
+                    <button
+                      onClick={() => vincularPeriferico(p)}
+                      className="text-sm bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg transition-colors"
+                    >
+                      Vincular
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+ 
+            <div className="flex justify-end mt-4">
+              <button
+                onClick={() => { setMostrarVincular(false); setBusquedaPeriferico(""); }}
+                className="px-4 py-2 rounded-lg border border-gray-300 text-gray-700 text-sm font-medium hover:bg-gray-50">
+                Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
- 
