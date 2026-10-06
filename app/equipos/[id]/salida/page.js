@@ -15,26 +15,16 @@ export default function SalidaEquipo({ params: paramsPromise }) {
   const [equipo, setEquipo] = useState(null);
   const [loading, setLoading] = useState(true);
   const [guardando, setGuardando] = useState(false);
+  const [pasoActual, setPasoActual] = useState(""); // Mensaje del paso actual al guardar
   const [error, setError] = useState("");
  
-  // Perifericos ya vinculados al equipo
   const [perifericosEquipo, setPerifericosEquipo] = useState([]);
- 
-  // Perifericos disponibles en el inventario (sin equipo asignado)
   const [perifericosDisponibles, setPerifericosDisponibles] = useState([]);
   const [busquedaPeriferico, setBusquedaPeriferico] = useState("");
   const [mostrarModalVincular, setMostrarModalVincular] = useState(false);
- 
-  // Perifericos seleccionados para esta salida (existentes del inventario)
   const [perifericosSeleccionados, setPerifericosSeleccionados] = useState([]);
- 
-  // Perifericos nuevos que se crean en esta salida
   const [perifericosNuevos, setPerifericosNuevos] = useState([]);
  
-  // Controla si se muestra el formulario de nuevo periferico
-  const [mostrarFormNuevo, setMostrarFormNuevo] = useState(false);
- 
-  // --- DATOS DEL FORMULARIO DE SALIDA ---
   const [salida, setSalida] = useState({
     usuario_nombre: "",
     usuario_correo: "",
@@ -63,7 +53,6 @@ export default function SalidaEquipo({ params: paramsPromise }) {
         .select("*")
         .eq("equipo_id", id);
  
-      // Cargamos perifericos disponibles en el inventario (sin equipo asignado)
       const { data: disponiblesData } = await supabase
         .from("perifericos")
         .select("*")
@@ -93,27 +82,20 @@ export default function SalidaEquipo({ params: paramsPromise }) {
   }
  
   // --- SELECCIONAR PERIFERICO EXISTENTE ---
-  // Agrega un periferico del inventario a la lista de seleccionados para esta salida
   function seleccionarPeriferico(periferico) {
-    // Verificamos que no este ya seleccionado
     if (perifericosSeleccionados.find((p) => p.id === periferico.id)) return;
     setPerifericosSeleccionados((prev) => [...prev, periferico]);
     setMostrarModalVincular(false);
     setBusquedaPeriferico("");
   }
  
-  // Quita un periferico de la lista de seleccionados
   function quitarSeleccionado(perifericoId) {
     setPerifericosSeleccionados((prev) => prev.filter((p) => p.id !== perifericoId));
   }
  
-  // --- MANEJO DE PERIFERICOS NUEVOS ---
+  // --- PERIFERICOS NUEVOS ---
   function agregarNuevoPeriferico() {
-    setPerifericosNuevos((prev) => [
-      ...prev,
-      { tipo: "Mouse", marca: "", modelo: "", serial: "" },
-    ]);
-    setMostrarFormNuevo(true);
+    setPerifericosNuevos((prev) => [...prev, { tipo: "Mouse", marca: "", modelo: "", serial: "" }]);
   }
  
   function actualizarNuevoPeriferico(index, campo, valor) {
@@ -124,7 +106,45 @@ export default function SalidaEquipo({ params: paramsPromise }) {
  
   function eliminarNuevoPeriferico(index) {
     setPerifericosNuevos((prev) => prev.filter((_, i) => i !== index));
-    if (perifericosNuevos.length <= 1) setMostrarFormNuevo(false);
+  }
+ 
+  // --- FUNCION: GENERAR PDF Y SUBIRLO A SUPABASE STORAGE ---
+  // Llama a la API route, recibe el PDF y lo sube a Supabase Storage
+  // Retorna la URL publica del archivo subido
+  async function generarYSubirPDF(endpoint, datos, nombreArchivo) {
+    try {
+      // 1. Llamamos a la API route que genera el PDF
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(datos),
+      });
+ 
+      if (!response.ok) throw new Error("Error al generar el PDF");
+ 
+      // 2. Convertimos la respuesta a un blob (archivo binario)
+      const blob = await response.blob();
+ 
+      // 3. Subimos el blob a Supabase Storage en el bucket "documentos"
+      const { data: archivoSubido, error: errorSubida } = await supabase.storage
+        .from("documentos")
+        .upload(nombreArchivo, blob, {
+          contentType: "application/pdf",
+          upsert: true, // Si ya existe, lo sobreescribe
+        });
+ 
+      if (errorSubida) throw new Error("Error al subir el PDF: " + errorSubida.message);
+ 
+      // 4. Obtenemos la URL publica del archivo subido
+      const { data: urlData } = supabase.storage
+        .from("documentos")
+        .getPublicUrl(nombreArchivo);
+ 
+      return urlData.publicUrl;
+    } catch (err) {
+      console.error("Error en generarYSubirPDF:", err);
+      return null; // Si falla, retornamos null para no bloquear el guardado
+    }
   }
  
   // --- GUARDAR SALIDA ---
@@ -146,20 +166,79 @@ export default function SalidaEquipo({ params: paramsPromise }) {
     }
  
     if (
-      !salida.usuario_nombre ||
-      !salida.usuario_cedula ||
-      !salida.usuario_correo ||
-      !salida.usuario_cargo ||
-      !salida.usuario_area ||
-      !salida.entregado_por ||
-      !salida.autorizado_por
+      !salida.usuario_nombre || !salida.usuario_cedula || !salida.usuario_correo ||
+      !salida.usuario_cargo || !salida.usuario_area || !salida.entregado_por || !salida.autorizado_por
     ) {
       setError("Por favor completa todos los campos obligatorios.");
       setGuardando(false);
       return;
     }
  
-    // 1. Guardamos el registro de salida
+    // Armamos la lista completa de perifericos para los documentos
+    const todosLosPerifericos = [
+      ...perifericosEquipo,
+      ...perifericosSeleccionados,
+      ...perifericosNuevos.filter((p) => p.marca),
+    ];
+ 
+    // Datos que se pasan a las APIs de generacion de PDF
+    const datosPDF = {
+      // Datos del equipo
+      tipo: equipo.tipo,
+      marca: equipo.marca,
+      modelo: equipo.modelo,
+      serial: equipo.serial,
+      hostname: salida.nuevo_hostname || equipo.hostname_actual,
+      procesador: equipo.procesador,
+      memoria_ram: equipo.memoria_ram,
+      almacenamiento: equipo.almacenamiento,
+      sistema_operativo: equipo.sistema_operativo,
+      version_so: equipo.version_so,
+      imei_1: equipo.imei_1,
+      imei_2: equipo.imei_2,
+      licencia_office: equipo.licencia_office,
+      antivirus: equipo.antivirus,
+      usuario_anterior: equipo.usuario_actual,
+ 
+      // Datos del nuevo usuario
+      usuario_nombre: salida.usuario_nombre,
+      usuario_correo: salida.usuario_correo,
+      usuario_cedula: salida.usuario_cedula,
+      usuario_cargo: salida.usuario_cargo,
+      usuario_area: salida.usuario_area,
+ 
+      // Datos de la entrega
+      entregado_por: salida.entregado_por,
+      ciudad_entrega: salida.ciudad_entrega,
+      fecha_entrega: salida.fecha_entrega,
+      autorizado_por: salida.autorizado_por,
+ 
+      // Perifericos
+      perifericos: todosLosPerifericos,
+    };
+ 
+    // Nombre unico para cada archivo usando la fecha y el serial del equipo
+    const timestamp = Date.now();
+    const nombreBase = `${equipo.serial}_${timestamp}`;
+ 
+    // PASO 1: Generamos el acta de entrega
+    setPasoActual("Generando acta de entrega...");
+    const urlActa = await generarYSubirPDF(
+      "/api/generar-acta",
+      datosPDF,
+      `actas/${nombreBase}_acta.pdf`
+    );
+ 
+    // PASO 2: Generamos la carta de autorizacion
+    setPasoActual("Generando carta de autorizacion...");
+    const urlCarta = await generarYSubirPDF(
+      "/api/generar-carta",
+      datosPDF,
+      `cartas/${nombreBase}_carta.pdf`
+    );
+ 
+    // PASO 3: Guardamos el registro de salida con las URLs de los documentos
+    setPasoActual("Guardando registro de salida...");
     const { data: salidaGuardada, error: errorSalida } = await supabase
       .from("registros_salida")
       .insert([{
@@ -176,6 +255,9 @@ export default function SalidaEquipo({ params: paramsPromise }) {
         fecha_entrega: salida.fecha_entrega,
         autorizado_por: salida.autorizado_por,
         observaciones: salida.observaciones,
+        // Guardamos las URLs de los documentos generados
+        url_acta_entrega: urlActa,
+        url_carta_autorizacion: urlCarta,
       }])
       .select()
       .single();
@@ -183,10 +265,12 @@ export default function SalidaEquipo({ params: paramsPromise }) {
     if (errorSalida) {
       setError("Error al registrar la salida: " + errorSalida.message);
       setGuardando(false);
+      setPasoActual("");
       return;
     }
  
-    // 2. Actualizamos el equipo
+    // PASO 4: Actualizamos el equipo
+    setPasoActual("Actualizando equipo...");
     await supabase
       .from("equipos")
       .update({
@@ -200,44 +284,30 @@ export default function SalidaEquipo({ params: paramsPromise }) {
       })
       .eq("id", id);
  
-    // 3. Guardamos snapshot de todos los perifericos en el registro de salida
-    const todosLosPerifericos = [
-      // Perifericos ya vinculados al equipo
+    // PASO 5: Guardamos snapshot de perifericos en el registro de salida
+    const snapshotPerifericos = [
       ...perifericosEquipo.map((p) => ({
         salida_id: salidaGuardada.id,
         periferico_id: p.id,
-        tipo: p.tipo,
-        marca: p.marca,
-        modelo: p.modelo,
-        serial: p.serial,
+        tipo: p.tipo, marca: p.marca, modelo: p.modelo, serial: p.serial,
       })),
-      // Perifericos existentes seleccionados del inventario
       ...perifericosSeleccionados.map((p) => ({
         salida_id: salidaGuardada.id,
         periferico_id: p.id,
-        tipo: p.tipo,
-        marca: p.marca,
-        modelo: p.modelo,
-        serial: p.serial,
+        tipo: p.tipo, marca: p.marca, modelo: p.modelo, serial: p.serial,
       })),
-      // Perifericos nuevos creados en esta salida
-      ...perifericosNuevos
-        .filter((p) => p.marca)
-        .map((p) => ({
-          salida_id: salidaGuardada.id,
-          periferico_id: null,
-          tipo: p.tipo,
-          marca: p.marca,
-          modelo: p.modelo,
-          serial: p.serial,
-        })),
+      ...perifericosNuevos.filter((p) => p.marca).map((p) => ({
+        salida_id: salidaGuardada.id,
+        periferico_id: null,
+        tipo: p.tipo, marca: p.marca, modelo: p.modelo, serial: p.serial,
+      })),
     ];
  
-    if (todosLosPerifericos.length > 0) {
-      await supabase.from("salida_perifericos").insert(todosLosPerifericos);
+    if (snapshotPerifericos.length > 0) {
+      await supabase.from("salida_perifericos").insert(snapshotPerifericos);
     }
  
-    // 4. Vinculamos los perifericos seleccionados al equipo
+    // PASO 6: Vinculamos perifericos seleccionados al equipo
     if (perifericosSeleccionados.length > 0) {
       await supabase
         .from("perifericos")
@@ -245,7 +315,7 @@ export default function SalidaEquipo({ params: paramsPromise }) {
         .in("id", perifericosSeleccionados.map((p) => p.id));
     }
  
-    // 5. Guardamos perifericos nuevos en la tabla perifericos vinculados al equipo
+    // PASO 7: Guardamos perifericos nuevos
     const nuevosParaGuardar = perifericosNuevos
       .filter((p) => p.marca)
       .map((p) => ({ ...p, equipo_id: id }));
@@ -254,6 +324,7 @@ export default function SalidaEquipo({ params: paramsPromise }) {
       await supabase.from("perifericos").insert(nuevosParaGuardar);
     }
  
+    setPasoActual("");
     router.push(`/equipos/${id}`);
   }
  
@@ -263,7 +334,6 @@ export default function SalidaEquipo({ params: paramsPromise }) {
   const esMovil = equipo.tipo === "Celular" || equipo.tipo === "Tablet";
   const puedeRegistrarSalida = equipo.estado === "En reserva";
  
-  // Filtramos perifericos disponibles segun busqueda y que no esten ya seleccionados
   const perifericosDisponiblesFiltrados = perifericosDisponibles
     .filter((p) => !perifericosSeleccionados.find((s) => s.id === p.id))
     .filter((p) => {
@@ -286,7 +356,7 @@ export default function SalidaEquipo({ params: paramsPromise }) {
         </a>
         <h1 className="text-2xl font-bold text-gray-800 mt-2">Registrar salida</h1>
         <p className="text-gray-500 text-sm mt-1">
-          Completa la informacion de la entrega del equipo al nuevo usuario
+          Al guardar se generaran automaticamente el acta de entrega y la carta de autorizacion en PDF
         </p>
       </div>
  
@@ -331,43 +401,33 @@ export default function SalidaEquipo({ params: paramsPromise }) {
             </h2>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Nombre <span className="text-red-500">*</span>
-                </label>
-                <input type="text" name="usuario_nombre" value={salida.usuario_nombre}
-                  onChange={actualizarCampo} placeholder="Nombre completo del usuario"
+                <label className="block text-sm font-medium text-gray-700 mb-1">Nombre <span className="text-red-500">*</span></label>
+                <input type="text" name="usuario_nombre" value={salida.usuario_nombre} onChange={actualizarCampo}
+                  placeholder="Nombre completo del usuario"
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Cedula <span className="text-red-500">*</span>
-                </label>
-                <input type="text" name="usuario_cedula" value={salida.usuario_cedula}
-                  onChange={actualizarCampo} placeholder="Numero de cedula"
+                <label className="block text-sm font-medium text-gray-700 mb-1">Cedula <span className="text-red-500">*</span></label>
+                <input type="text" name="usuario_cedula" value={salida.usuario_cedula} onChange={actualizarCampo}
+                  placeholder="Numero de cedula"
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Correo <span className="text-red-500">*</span>
-                </label>
-                <input type="email" name="usuario_correo" value={salida.usuario_correo}
-                  onChange={actualizarCampo} placeholder="correo@empresa.com"
+                <label className="block text-sm font-medium text-gray-700 mb-1">Correo <span className="text-red-500">*</span></label>
+                <input type="email" name="usuario_correo" value={salida.usuario_correo} onChange={actualizarCampo}
+                  placeholder="correo@empresa.com"
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Cargo <span className="text-red-500">*</span>
-                </label>
-                <input type="text" name="usuario_cargo" value={salida.usuario_cargo}
-                  onChange={actualizarCampo} placeholder="Cargo del usuario"
+                <label className="block text-sm font-medium text-gray-700 mb-1">Cargo <span className="text-red-500">*</span></label>
+                <input type="text" name="usuario_cargo" value={salida.usuario_cargo} onChange={actualizarCampo}
+                  placeholder="Cargo del usuario"
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
               </div>
               <div className="sm:col-span-2">
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Area <span className="text-red-500">*</span>
-                </label>
-                <input type="text" name="usuario_area" value={salida.usuario_area}
-                  onChange={actualizarCampo} placeholder="Area o departamento"
+                <label className="block text-sm font-medium text-gray-700 mb-1">Area <span className="text-red-500">*</span></label>
+                <input type="text" name="usuario_area" value={salida.usuario_area} onChange={actualizarCampo}
+                  placeholder="Area o departamento"
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
               </div>
             </div>
@@ -380,23 +440,20 @@ export default function SalidaEquipo({ params: paramsPromise }) {
             </h2>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Entregado por <span className="text-red-500">*</span>
-                </label>
-                <input type="text" name="entregado_por" value={salida.entregado_por}
-                  onChange={actualizarCampo} placeholder="Nombre de quien entrega"
+                <label className="block text-sm font-medium text-gray-700 mb-1">Entregado por <span className="text-red-500">*</span></label>
+                <input type="text" name="entregado_por" value={salida.entregado_por} onChange={actualizarCampo}
+                  placeholder="Nombre de quien entrega"
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Ciudad</label>
-                <input type="text" name="ciudad_entrega" value={salida.ciudad_entrega}
-                  onChange={actualizarCampo} placeholder="Ciudad de ubicacion"
+                <input type="text" name="ciudad_entrega" value={salida.ciudad_entrega} onChange={actualizarCampo}
+                  placeholder="Ciudad de ubicacion"
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Fecha de entrega</label>
-                <input type="date" name="fecha_entrega" value={salida.fecha_entrega}
-                  onChange={actualizarCampo}
+                <input type="date" name="fecha_entrega" value={salida.fecha_entrega} onChange={actualizarCampo}
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
               </div>
             </div>
@@ -409,18 +466,15 @@ export default function SalidaEquipo({ params: paramsPromise }) {
             </h2>
             <div className="grid grid-cols-1 gap-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Autorizado por <span className="text-red-500">*</span>
-                </label>
-                <input type="text" name="autorizado_por" value={salida.autorizado_por}
-                  onChange={actualizarCampo} placeholder="Nombre del jefe o responsable que autoriza"
+                <label className="block text-sm font-medium text-gray-700 mb-1">Autorizado por <span className="text-red-500">*</span></label>
+                <input type="text" name="autorizado_por" value={salida.autorizado_por} onChange={actualizarCampo}
+                  placeholder="Nombre del jefe o responsable que autoriza"
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Observaciones</label>
-                <textarea name="observaciones" value={salida.observaciones}
-                  onChange={actualizarCampo} placeholder="Observaciones adicionales..."
-                  rows={3}
+                <textarea name="observaciones" value={salida.observaciones} onChange={actualizarCampo}
+                  placeholder="Observaciones adicionales..." rows={3}
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none" />
               </div>
             </div>
@@ -432,15 +486,10 @@ export default function SalidaEquipo({ params: paramsPromise }) {
               <h2 className="text-lg font-semibold text-gray-700 mb-4 pb-2 border-b border-gray-100">
                 🖥 Nuevo hostname
               </h2>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Hostname</label>
-                <input type="text" name="nuevo_hostname" value={salida.nuevo_hostname}
-                  onChange={actualizarCampo} placeholder="Nuevo hostname del equipo"
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                <p className="text-xs text-gray-400 mt-1">
-                  Si el hostname cambia, se guardara automaticamente en el historial.
-                </p>
-              </div>
+              <input type="text" name="nuevo_hostname" value={salida.nuevo_hostname} onChange={actualizarCampo}
+                placeholder="Nuevo hostname del equipo"
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+              <p className="text-xs text-gray-400 mt-1">Si el hostname cambia, se guardara automaticamente en el historial.</p>
             </div>
           )}
  
@@ -450,12 +499,9 @@ export default function SalidaEquipo({ params: paramsPromise }) {
               🖱 Perifericos para esta entrega
             </h2>
  
-            {/* Perifericos ya vinculados al equipo - se incluyen automaticamente */}
             {perifericosEquipo.length > 0 && (
               <div className="mb-5">
-                <p className="text-xs font-semibold text-gray-500 mb-2">
-                  Vinculados al equipo (se incluyen automaticamente):
-                </p>
+                <p className="text-xs font-semibold text-gray-500 mb-2">Vinculados al equipo (se incluyen automaticamente):</p>
                 <div className="flex flex-wrap gap-2">
                   {perifericosEquipo.map((p) => (
                     <span key={p.id} className="text-xs bg-purple-50 text-purple-700 px-3 py-1.5 rounded-full border border-purple-200">
@@ -466,12 +512,9 @@ export default function SalidaEquipo({ params: paramsPromise }) {
               </div>
             )}
  
-            {/* Perifericos existentes seleccionados del inventario */}
             {perifericosSeleccionados.length > 0 && (
               <div className="mb-5">
-                <p className="text-xs font-semibold text-gray-500 mb-2">
-                  Perifericos del inventario seleccionados:
-                </p>
+                <p className="text-xs font-semibold text-gray-500 mb-2">Del inventario seleccionados:</p>
                 <div className="space-y-2">
                   {perifericosSeleccionados.map((p) => (
                     <div key={p.id} className="flex items-center justify-between bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
@@ -479,7 +522,6 @@ export default function SalidaEquipo({ params: paramsPromise }) {
                         <span className="text-xs text-blue-600 font-semibold">{p.tipo}</span>
                         <p className="text-sm text-blue-800">{p.marca} {p.modelo || ""} {p.serial ? `(${p.serial})` : ""}</p>
                       </div>
-                      {/* Boton para quitar este periferico de la seleccion */}
                       <button type="button" onClick={() => quitarSeleccionado(p.id)}
                         className="text-xs text-red-400 hover:text-red-600 ml-3 transition-colors">
                         ✕ Quitar
@@ -490,7 +532,6 @@ export default function SalidaEquipo({ params: paramsPromise }) {
               </div>
             )}
  
-            {/* Perifericos nuevos creados en esta salida */}
             {perifericosNuevos.length > 0 && (
               <div className="mb-5">
                 <p className="text-xs font-semibold text-gray-500 mb-2">Perifericos nuevos:</p>
@@ -504,28 +545,24 @@ export default function SalidaEquipo({ params: paramsPromise }) {
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-2">
                         <div>
                           <label className="block text-xs font-medium text-gray-600 mb-1">Tipo</label>
-                          <select value={p.tipo}
-                            onChange={(e) => actualizarNuevoPeriferico(index, "tipo", e.target.value)}
+                          <select value={p.tipo} onChange={(e) => actualizarNuevoPeriferico(index, "tipo", e.target.value)}
                             className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
                             {TIPOS_PERIFERICO.map((t) => <option key={t}>{t}</option>)}
                           </select>
                         </div>
                         <div>
                           <label className="block text-xs font-medium text-gray-600 mb-1">Marca</label>
-                          <input type="text" value={p.marca}
-                            onChange={(e) => actualizarNuevoPeriferico(index, "marca", e.target.value)}
+                          <input type="text" value={p.marca} onChange={(e) => actualizarNuevoPeriferico(index, "marca", e.target.value)}
                             placeholder="Marca" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
                         </div>
                         <div>
                           <label className="block text-xs font-medium text-gray-600 mb-1">Modelo</label>
-                          <input type="text" value={p.modelo}
-                            onChange={(e) => actualizarNuevoPeriferico(index, "modelo", e.target.value)}
+                          <input type="text" value={p.modelo} onChange={(e) => actualizarNuevoPeriferico(index, "modelo", e.target.value)}
                             placeholder="Modelo" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
                         </div>
                         <div>
                           <label className="block text-xs font-medium text-gray-600 mb-1">Serial</label>
-                          <input type="text" value={p.serial}
-                            onChange={(e) => actualizarNuevoPeriferico(index, "serial", e.target.value)}
+                          <input type="text" value={p.serial} onChange={(e) => actualizarNuevoPeriferico(index, "serial", e.target.value)}
                             placeholder="Serial" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
                         </div>
                       </div>
@@ -535,14 +572,11 @@ export default function SalidaEquipo({ params: paramsPromise }) {
               </div>
             )}
  
-            {/* Botones para agregar perifericos */}
             <div className="flex gap-3 flex-wrap">
-              {/* Boton para seleccionar un periferico ya existente del inventario */}
               <button type="button" onClick={() => setMostrarModalVincular(true)}
                 className="flex items-center gap-2 text-sm bg-blue-50 hover:bg-blue-100 text-blue-600 font-medium px-4 py-2 rounded-lg transition-colors">
                 🔗 Agregar del inventario
               </button>
-              {/* Boton para crear un periferico nuevo */}
               <button type="button" onClick={agregarNuevoPeriferico}
                 className="flex items-center gap-2 text-sm bg-gray-50 hover:bg-gray-100 text-gray-600 font-medium px-4 py-2 rounded-lg transition-colors">
                 + Nuevo periferico
@@ -550,15 +584,30 @@ export default function SalidaEquipo({ params: paramsPromise }) {
             </div>
           </div>
  
-          {/* BOTONES de accion */}
+          {/* AVISO DE GENERACION DE DOCUMENTOS */}
+          <div className="bg-green-50 border border-green-200 rounded-xl p-4">
+            <p className="text-sm font-semibold text-green-800 mb-1">📄 Documentos que se generaran automaticamente:</p>
+            <ul className="text-sm text-green-700 space-y-1">
+              <li>✅ Acta de entrega (PDF) — firmada por el usuario que recibe</li>
+              <li>✅ Carta de autorizacion (PDF) — dirigida al jefe autorizante</li>
+            </ul>
+            <p className="text-xs text-green-600 mt-2">Ambos documentos quedaran disponibles para descarga en el historial del equipo.</p>
+          </div>
+ 
+          {/* BOTONES */}
           <div className="flex gap-3 justify-end pb-8">
             <a href={`/equipos/${id}`}
               className="px-6 py-2.5 rounded-lg border border-gray-300 text-gray-700 text-sm font-medium hover:bg-gray-50 transition-colors">
               Cancelar
             </a>
             <button type="submit" disabled={guardando || !puedeRegistrarSalida}
-              className="px-6 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-              {guardando ? "Registrando..." : "Registrar salida"}
+              className="px-6 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed min-w-[160px]">
+              {guardando ? (
+                <span className="flex items-center gap-2 justify-center">
+                  <span className="animate-spin">⏳</span>
+                  {pasoActual || "Procesando..."}
+                </span>
+              ) : "Registrar salida"}
             </button>
           </div>
         </form>
@@ -569,17 +618,10 @@ export default function SalidaEquipo({ params: paramsPromise }) {
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-xl shadow-xl p-6 max-w-lg w-full">
             <h3 className="text-lg font-bold text-gray-800 mb-2">Agregar periferico del inventario</h3>
-            <p className="text-sm text-gray-500 mb-4">
-              Selecciona un periferico disponible para incluirlo en esta entrega.
-            </p>
- 
-            {/* Buscador */}
+            <p className="text-sm text-gray-500 mb-4">Selecciona un periferico disponible para incluirlo en esta entrega.</p>
             <input type="text" placeholder="Buscar por tipo, marca, modelo o serial..."
-              value={busquedaPeriferico}
-              onChange={(e) => setBusquedaPeriferico(e.target.value)}
+              value={busquedaPeriferico} onChange={(e) => setBusquedaPeriferico(e.target.value)}
               className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 mb-4" />
- 
-            {/* Lista de perifericos disponibles */}
             <div className="max-h-72 overflow-y-auto space-y-2">
               {perifericosDisponiblesFiltrados.length === 0 ? (
                 <div className="text-center py-8 text-gray-400">
@@ -592,8 +634,7 @@ export default function SalidaEquipo({ params: paramsPromise }) {
                 </div>
               ) : (
                 perifericosDisponiblesFiltrados.map((p) => (
-                  <div key={p.id}
-                    className="flex items-center justify-between border border-gray-200 rounded-lg p-3 hover:border-blue-300 hover:bg-blue-50 transition-colors">
+                  <div key={p.id} className="flex items-center justify-between border border-gray-200 rounded-lg p-3 hover:border-blue-300 hover:bg-blue-50 transition-colors">
                     <div>
                       <p className="text-xs text-purple-600 font-semibold">{p.tipo}</p>
                       <p className="text-sm font-medium text-gray-800">{p.marca} {p.modelo || ""}</p>
@@ -607,10 +648,8 @@ export default function SalidaEquipo({ params: paramsPromise }) {
                 ))
               )}
             </div>
- 
             <div className="flex justify-end mt-4">
-              <button type="button"
-                onClick={() => { setMostrarModalVincular(false); setBusquedaPeriferico(""); }}
+              <button type="button" onClick={() => { setMostrarModalVincular(false); setBusquedaPeriferico(""); }}
                 className="px-4 py-2 rounded-lg border border-gray-300 text-gray-700 text-sm font-medium hover:bg-gray-50">
                 Cerrar
               </button>
