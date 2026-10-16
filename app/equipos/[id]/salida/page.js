@@ -198,7 +198,9 @@ export default function SalidaEquipo({ params: paramsPromise }) {
       imei_2: equipo.imei_2,
       licencia_office: equipo.licencia_office,
       antivirus: equipo.antivirus,
-      usuario_anterior: equipo.usuario_actual,
+      // Usuario que tenia el equipo ANTES de esta salida
+      // Se toma de usuario_actual antes de que se actualice al nuevo usuario
+      usuario_anterior: equipo.usuario_actual || "Sin usuario anterior",
  
       // Datos del nuevo usuario
       usuario_nombre: salida.usuario_nombre,
