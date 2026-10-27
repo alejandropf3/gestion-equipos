@@ -20,10 +20,10 @@ export default function ReingresaEquipo({ params: paramsPromise }) {
  
   // --- DATOS DEL FORMULARIO DE REINGRESO ---
   const [reingreso, setReingreso] = useState({
-    recibido_por: "",       // Quien recibe el equipo de vuelta en sistemas
+    recibido_por: "",
     ciudad_recepcion: "",
-    fecha_recepcion: new Date().toISOString().split("T")[0], // Fecha de hoy
-    observaciones: "",      // Estado en que regresa el equipo
+    fecha_recepcion: new Date().toISOString().split("T")[0],
+    observaciones: "",
   });
  
   // --- CARGA INICIAL ---
@@ -43,12 +43,10 @@ export default function ReingresaEquipo({ params: paramsPromise }) {
       setEquipo(equipoData);
       setPerifericosEquipo(perifericosData || []);
  
-      // Si el equipo ya esta en reserva, mostramos advertencia
       if (equipoData?.estado === "En reserva") {
         setError(`Este equipo ya esta en estado "En reserva" y no necesita reingreso.`);
       }
  
-      // Prellenamos quien recibe con el responsable actual como sugerencia
       if (equipoData?.recibido_por) {
         setReingreso((prev) => ({ ...prev, recibido_por: equipoData.recibido_por }));
       }
@@ -70,29 +68,25 @@ export default function ReingresaEquipo({ params: paramsPromise }) {
     setGuardando(true);
     setError("");
  
-    // Verificamos que el equipo haya cargado
     if (!equipo) {
       setError("No se pudo cargar el equipo.");
       setGuardando(false);
       return;
     }
  
-    // Bloqueamos si el equipo ya esta en reserva
     if (equipo.estado === "En reserva") {
       setError(`Este equipo ya esta en estado "En reserva" y no necesita reingreso.`);
       setGuardando(false);
       return;
     }
  
-    // Validacion de campos obligatorios
     if (!reingreso.recibido_por) {
       setError("Por favor indica quien recibe el equipo.");
       setGuardando(false);
       return;
     }
  
-    // 1. Guardamos el registro de reingreso en la tabla registros_ingreso
-    // Guardamos quien lo devuelve (usuario anterior) en propietario_nombre
+    // 1. Guardamos el registro de reingreso en registros_ingreso
     const { error: errorIngreso } = await supabase
       .from("registros_ingreso")
       .insert([{
@@ -101,7 +95,7 @@ export default function ReingresaEquipo({ params: paramsPromise }) {
         recibido_por: reingreso.recibido_por,
         ciudad_recepcion: reingreso.ciudad_recepcion,
         fecha_recepcion: reingreso.fecha_recepcion,
-        // Guardamos el usuario que tenia el equipo como referencia del que lo devuelve
+        // Guardamos quien devuelve el equipo (usuario que lo tenia)
         propietario_nombre: equipo.usuario_actual,
         propietario_cedula: equipo.propietario_cedula,
         propietario_correo: equipo.propietario_correo,
@@ -115,14 +109,17 @@ export default function ReingresaEquipo({ params: paramsPromise }) {
     }
  
     // 2. Actualizamos el estado del equipo a En reserva y limpiamos el usuario actual
+    // Guardamos en ultimo_usuario quien era el responsable antes de limpiar
+    // Esto permite que la proxima salida sepa quien fue el ultimo usuario
     await supabase
       .from("equipos")
       .update({
         estado: "En reserva",
-        usuario_actual: null,          // Sin usuario asignado
-        propietario_nombre: null,      // Se limpia el responsable
+        usuario_actual: null,
+        propietario_nombre: null,
         propietario_cedula: null,
         propietario_correo: null,
+        ultimo_usuario: equipo.usuario_actual, // Guardamos el ultimo usuario antes de limpiar
         updated_at: new Date().toISOString(),
       })
       .eq("id", id);
@@ -143,7 +140,6 @@ export default function ReingresaEquipo({ params: paramsPromise }) {
   if (loading) return <div className="text-center py-20 text-gray-400">Cargando...</div>;
   if (!equipo) return <div className="text-center py-20 text-red-500">Equipo no encontrado.</div>;
  
-  // Verificamos si el equipo puede registrar reingreso
   const puedeReingreso = equipo.estado !== "En reserva";
  
   return (
@@ -169,21 +165,22 @@ export default function ReingresaEquipo({ params: paramsPromise }) {
           {equipo.hostname_actual && (
             <p className="text-sm text-blue-600">Hostname: {equipo.hostname_actual}</p>
           )}
-          {/* Mostramos quien tenia el equipo antes de devolverlo */}
           {equipo.usuario_actual && (
-            <p className="text-sm text-blue-600">Devuelto por: <strong>{equipo.usuario_actual}</strong></p>
+            <p className="text-sm text-blue-600">
+              Devuelto por: <strong>{equipo.usuario_actual}</strong>
+            </p>
           )}
         </div>
       </div>
  
-      {/* MENSAJE DE ERROR O BLOQUEO */}
+      {/* MENSAJE DE ERROR */}
       {error && (
         <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg p-4 mb-6 text-sm">
           {error}
         </div>
       )}
  
-      {/* Si el equipo ya esta en reserva, mostramos bloqueo */}
+      {/* BLOQUEO SI EL EQUIPO YA ESTA EN RESERVA */}
       {!puedeReingreso ? (
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-8 text-center">
           <p className="text-4xl mb-3">✅</p>
@@ -290,7 +287,7 @@ export default function ReingresaEquipo({ params: paramsPromise }) {
             </ul>
           </div>
  
-          {/* BOTONES de accion */}
+          {/* BOTONES */}
           <div className="flex gap-3 justify-end pb-8">
             <a href={`/equipos/${id}`}
               className="px-6 py-2.5 rounded-lg border border-gray-300 text-gray-700 text-sm font-medium hover:bg-gray-50 transition-colors">

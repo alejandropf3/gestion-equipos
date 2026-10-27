@@ -15,7 +15,7 @@ export default function SalidaEquipo({ params: paramsPromise }) {
   const [equipo, setEquipo] = useState(null);
   const [loading, setLoading] = useState(true);
   const [guardando, setGuardando] = useState(false);
-  const [pasoActual, setPasoActual] = useState(""); // Mensaje del paso actual al guardar
+  const [pasoActual, setPasoActual] = useState("");
   const [error, setError] = useState("");
  
   const [perifericosEquipo, setPerifericosEquipo] = useState([]);
@@ -42,6 +42,7 @@ export default function SalidaEquipo({ params: paramsPromise }) {
   // --- CARGA INICIAL ---
   useEffect(() => {
     async function cargarDatos() {
+      // Traemos todos los campos del equipo incluyendo ultimo_usuario
       const { data: equipoData } = await supabase
         .from("equipos")
         .select("*")
@@ -108,12 +109,9 @@ export default function SalidaEquipo({ params: paramsPromise }) {
     setPerifericosNuevos((prev) => prev.filter((_, i) => i !== index));
   }
  
-  // --- FUNCION: GENERAR PDF Y SUBIRLO A SUPABASE STORAGE ---
-  // Llama a la API route, recibe el PDF y lo sube a Supabase Storage
-  // Retorna la URL publica del archivo subido
+  // --- GENERAR PDF Y SUBIRLO A SUPABASE STORAGE ---
   async function generarYSubirPDF(endpoint, datos, nombreArchivo) {
     try {
-      // 1. Llamamos a la API route que genera el PDF
       const response = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -122,20 +120,17 @@ export default function SalidaEquipo({ params: paramsPromise }) {
  
       if (!response.ok) throw new Error("Error al generar el PDF");
  
-      // 2. Convertimos la respuesta a un blob (archivo binario)
       const blob = await response.blob();
  
-      // 3. Subimos el blob a Supabase Storage en el bucket "documentos"
-      const { data: archivoSubido, error: errorSubida } = await supabase.storage
+      const { error: errorSubida } = await supabase.storage
         .from("documentos")
         .upload(nombreArchivo, blob, {
           contentType: "application/pdf",
-          upsert: true, // Si ya existe, lo sobreescribe
+          upsert: true,
         });
  
       if (errorSubida) throw new Error("Error al subir el PDF: " + errorSubida.message);
  
-      // 4. Obtenemos la URL publica del archivo subido
       const { data: urlData } = supabase.storage
         .from("documentos")
         .getPublicUrl(nombreArchivo);
@@ -143,7 +138,7 @@ export default function SalidaEquipo({ params: paramsPromise }) {
       return urlData.publicUrl;
     } catch (err) {
       console.error("Error en generarYSubirPDF:", err);
-      return null; // Si falla, retornamos null para no bloquear el guardado
+      return null;
     }
   }
  
@@ -174,16 +169,17 @@ export default function SalidaEquipo({ params: paramsPromise }) {
       return;
     }
  
-    // Armamos la lista completa de perifericos para los documentos
+    // Lista completa de perifericos para los documentos
     const todosLosPerifericos = [
       ...perifericosEquipo,
       ...perifericosSeleccionados,
       ...perifericosNuevos.filter((p) => p.marca),
     ];
  
-    // Datos que se pasan a las APIs de generacion de PDF
+    // Datos para los PDFs
+    // usuario_anterior: primero intentamos usuario_actual (si el equipo esta entregado)
+    // si no, usamos ultimo_usuario (el que tenia antes del ultimo reingreso)
     const datosPDF = {
-      // Datos del equipo
       tipo: equipo.tipo,
       marca: equipo.marca,
       modelo: equipo.modelo,
@@ -198,28 +194,21 @@ export default function SalidaEquipo({ params: paramsPromise }) {
       imei_2: equipo.imei_2,
       licencia_office: equipo.licencia_office,
       antivirus: equipo.antivirus,
-      // Usuario que tenia el equipo ANTES de esta salida
-      // Se toma de usuario_actual antes de que se actualice al nuevo usuario
-      usuario_anterior: equipo.usuario_actual || "Sin usuario anterior",
- 
-      // Datos del nuevo usuario
+      software_corporativo: equipo.software_corporativo || "",
+      // Tomamos el usuario anterior del campo actual o del ultimo guardado al reingresar
+      usuario_anterior: equipo.usuario_actual || equipo.ultimo_usuario || "N/A",
       usuario_nombre: salida.usuario_nombre,
       usuario_correo: salida.usuario_correo,
       usuario_cedula: salida.usuario_cedula,
       usuario_cargo: salida.usuario_cargo,
       usuario_area: salida.usuario_area,
- 
-      // Datos de la entrega
       entregado_por: salida.entregado_por,
       ciudad_entrega: salida.ciudad_entrega,
       fecha_entrega: salida.fecha_entrega,
       autorizado_por: salida.autorizado_por,
- 
-      // Perifericos
       perifericos: todosLosPerifericos,
     };
  
-    // Nombre unico para cada archivo usando la fecha y el serial del equipo
     const timestamp = Date.now();
     const nombreBase = `${equipo.serial}_${timestamp}`;
  
@@ -257,7 +246,6 @@ export default function SalidaEquipo({ params: paramsPromise }) {
         fecha_entrega: salida.fecha_entrega,
         autorizado_por: salida.autorizado_por,
         observaciones: salida.observaciones,
-        // Guardamos las URLs de los documentos generados
         url_acta_entrega: urlActa,
         url_carta_autorizacion: urlCarta,
       }])
@@ -282,11 +270,13 @@ export default function SalidaEquipo({ params: paramsPromise }) {
         propietario_cedula: salida.usuario_cedula,
         propietario_correo: salida.usuario_correo,
         hostname_actual: salida.nuevo_hostname || equipo.hostname_actual,
+        // Limpiamos ultimo_usuario ya que ahora tiene un usuario activo nuevo
+        ultimo_usuario: null,
         updated_at: new Date().toISOString(),
       })
       .eq("id", id);
  
-    // PASO 5: Guardamos snapshot de perifericos en el registro de salida
+    // PASO 5: Guardamos snapshot de perifericos
     const snapshotPerifericos = [
       ...perifericosEquipo.map((p) => ({
         salida_id: salidaGuardada.id,
@@ -491,7 +481,9 @@ export default function SalidaEquipo({ params: paramsPromise }) {
               <input type="text" name="nuevo_hostname" value={salida.nuevo_hostname} onChange={actualizarCampo}
                 placeholder="Nuevo hostname del equipo"
                 className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
-              <p className="text-xs text-gray-400 mt-1">Si el hostname cambia, se guardara automaticamente en el historial.</p>
+              <p className="text-xs text-gray-400 mt-1">
+                Si el hostname cambia, se guardara automaticamente en el historial.
+              </p>
             </div>
           )}
  
@@ -503,7 +495,9 @@ export default function SalidaEquipo({ params: paramsPromise }) {
  
             {perifericosEquipo.length > 0 && (
               <div className="mb-5">
-                <p className="text-xs font-semibold text-gray-500 mb-2">Vinculados al equipo (se incluyen automaticamente):</p>
+                <p className="text-xs font-semibold text-gray-500 mb-2">
+                  Vinculados al equipo (se incluyen automaticamente):
+                </p>
                 <div className="flex flex-wrap gap-2">
                   {perifericosEquipo.map((p) => (
                     <span key={p.id} className="text-xs bg-purple-50 text-purple-700 px-3 py-1.5 rounded-full border border-purple-200">
@@ -554,17 +548,20 @@ export default function SalidaEquipo({ params: paramsPromise }) {
                         </div>
                         <div>
                           <label className="block text-xs font-medium text-gray-600 mb-1">Marca</label>
-                          <input type="text" value={p.marca} onChange={(e) => actualizarNuevoPeriferico(index, "marca", e.target.value)}
+                          <input type="text" value={p.marca}
+                            onChange={(e) => actualizarNuevoPeriferico(index, "marca", e.target.value)}
                             placeholder="Marca" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
                         </div>
                         <div>
                           <label className="block text-xs font-medium text-gray-600 mb-1">Modelo</label>
-                          <input type="text" value={p.modelo} onChange={(e) => actualizarNuevoPeriferico(index, "modelo", e.target.value)}
+                          <input type="text" value={p.modelo}
+                            onChange={(e) => actualizarNuevoPeriferico(index, "modelo", e.target.value)}
                             placeholder="Modelo" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
                         </div>
                         <div>
                           <label className="block text-xs font-medium text-gray-600 mb-1">Serial</label>
-                          <input type="text" value={p.serial} onChange={(e) => actualizarNuevoPeriferico(index, "serial", e.target.value)}
+                          <input type="text" value={p.serial}
+                            onChange={(e) => actualizarNuevoPeriferico(index, "serial", e.target.value)}
                             placeholder="Serial" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
                         </div>
                       </div>
@@ -590,8 +587,8 @@ export default function SalidaEquipo({ params: paramsPromise }) {
           <div className="bg-green-50 border border-green-200 rounded-xl p-4">
             <p className="text-sm font-semibold text-green-800 mb-1">📄 Documentos que se generaran automaticamente:</p>
             <ul className="text-sm text-green-700 space-y-1">
-              <li>✅ Acta de entrega (PDF) — firmada por el usuario que recibe</li>
-              <li>✅ Carta de autorizacion (PDF) — dirigida al jefe autorizante</li>
+              <li>✅ Acta de entrega (PDF)</li>
+              <li>✅ Carta de autorizacion (PDF)</li>
             </ul>
             <p className="text-xs text-green-600 mt-2">Ambos documentos quedaran disponibles para descarga en el historial del equipo.</p>
           </div>
