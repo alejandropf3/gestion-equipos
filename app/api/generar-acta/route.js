@@ -1,5 +1,9 @@
 // API Route de Next.js que corre en el SERVIDOR
-// Genera el acta de entrega STI-FOR-001 con logo, colores corporativos y multipagina
+// Genera el acta de entrega STI-FOR-001 en 3 paginas, igual que el documento original:
+//   Pagina 1: Informacion general + Descripcion del equipo
+//   Pagina 2: Condiciones de uso
+//   Pagina 3: Aceptacion y autorizacion + firma
+// Cada pagina repite el encabezado (logo, titulo, codigo, version) y el pie (elaborado/revisado/aprobado)
  
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
  
@@ -10,41 +14,33 @@ export async function POST(request) {
   try {
     const datos = await request.json();
  
-    const pdfDoc = await PDFDocument.create();
+    const pdfDoc      = await PDFDocument.create();
     const fontBold    = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
     const fontRegular = await pdfDoc.embedFont(StandardFonts.Helvetica);
  
     // Incrustamos el logo PNG
-    const logoBytes = Uint8Array.from(atob(LOGO_BASE64), c => c.charCodeAt(0));
-    const logoImg   = await pdfDoc.embedPng(logoBytes);
-    const logoDims  = logoImg.scale(0.30); // Escala el logo para que quepa en el encabezado
+    const logoImg  = await pdfDoc.embedPng(Buffer.from(LOGO_BASE64, "base64"));
+    const logoDims = logoImg.scale(0.30);
  
-    // Dimensiones pagina carta
+    // --- DIMENSIONES (pagina carta) ---
     const PW = 612, PH = 792;
-    const ML = 35, MR = 577, MT = 750, MB = 55;
-    const AW = MR - ML;
+    const ML = 35, MR = 577, MT = 750;
+    const AW = MR - ML;   // ancho util
+    const MB = 85;        // limite inferior del contenido (arriba del pie de pagina)
  
-    // Colores corporativos TRIENERGY
+    // --- COLORES CORPORATIVOS TRIENERGY ---
     const negro     = rgb(0, 0, 0);
     const blanco    = rgb(1, 1, 1);
-    const rojo      = rgb(0.78, 0.08, 0.08);   // Rojo corporativo
-    const grisOsc   = rgb(0.35, 0.35, 0.35);   // Gris oscuro para texto secundario
-    const grisMed   = rgb(0.75, 0.75, 0.75);   // Gris medio para fondos alternos
-    const grisClaro = rgb(0.92, 0.92, 0.92);   // Gris claro para encabezados de tabla
+    const rojo      = rgb(0.78, 0.08, 0.08);
+    const grisOsc   = rgb(0.35, 0.35, 0.35);
+    const grisClaro = rgb(0.92, 0.92, 0.92);
  
     let page = pdfDoc.addPage([PW, PH]);
     let y = MT;
  
-    function nuevaPagina() {
-      page = pdfDoc.addPage([PW, PH]);
-      y = MT;
-      dibujarEncabezado(); // Repetimos el encabezado en cada pagina
-    }
- 
-    function checkEspacio(necesario) {
-      if (y - necesario < MB) nuevaPagina();
-    }
- 
+    // ============================================================
+    // FUNCIONES AUXILIARES DE DIBUJO
+    // ============================================================
     function txt(val, x, yp, { f = fontRegular, s = 8, c = negro } = {}) {
       const v = val === null || val === undefined ? "" : String(val);
       if (v) page.drawText(v, { x, y: yp, size: s, font: f, color: c });
@@ -74,19 +70,20 @@ export async function POST(request) {
       page.drawLine({ start: { x, y: y1 }, end: { x, y: y2 }, thickness: t, color: c });
     }
  
+    // Texto que baja de linea automaticamente segun el ancho maximo. Retorna la y final
     function multilinea(contenido, x, yp, maxW, { f = fontRegular, s = 8, c = negro, lh = 12 } = {}) {
       const palabras = String(contenido || "").split(" ");
       let lineaActual = "";
       let yActual = yp;
       palabras.forEach((p) => {
         const prueba = lineaActual ? lineaActual + " " + p : p;
-        if (f.widthOfTextAtSize(prueba, s) > maxW) {
-          if (lineaActual) {
-            page.drawText(lineaActual, { x, y: yActual, size: s, font: f, color: c });
-            yActual -= lh;
-            lineaActual = p;
-          } else { lineaActual = p; }
-        } else { lineaActual = prueba; }
+        if (f.widthOfTextAtSize(prueba, s) > maxW && lineaActual) {
+          page.drawText(lineaActual, { x, y: yActual, size: s, font: f, color: c });
+          yActual -= lh;
+          lineaActual = p;
+        } else {
+          lineaActual = prueba;
+        }
       });
       if (lineaActual) {
         page.drawText(lineaActual, { x, y: yActual, size: s, font: f, color: c });
@@ -95,16 +92,25 @@ export async function POST(request) {
       return yActual;
     }
  
+    // Convierte 2026-10-16 en 16/10/2026 (formato del documento original)
+    function formatearFecha(f) {
+      if (!f) return "";
+      const m = String(f).match(/^(\d{4})-(\d{2})-(\d{2})/);
+      return m ? `${m[3]}/${m[2]}/${m[1]}` : String(f);
+    }
+ 
+    // Quita tildes y pasa a minusculas para comparar tipos ("Audífonos" = "audifonos")
+    const norm = (s) => String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+ 
     // ============================================================
-    // ENCABEZADO - Logo + Titulo + Codigo/Version/STI
+    // ENCABEZADO (se dibuja en cada pagina)
     // ============================================================
     function dibujarEncabezado() {
       const hE = 36;
  
-      // Borde exterior del encabezado
       recB(ML, y - hE, AW, hE, negro, 0.8);
  
-      // Celda logo (fondo blanco, logo centrado)
+      // Celda logo
       recB(ML, y - hE, 90, hE, negro, 0.8, blanco);
       page.drawImage(logoImg, {
         x: ML + (90 - logoDims.width) / 2,
@@ -118,18 +124,11 @@ export async function POST(request) {
       recB(ML + 90, y - hE, 250, hE, negro, 0.8);
       txtC("FORMATO DE ENTREGA DE EQUIPOS", ML + 90, y - hE / 2 - 4, 250, { f: fontBold, s: 9, c: blanco });
  
-      // Celda codigo
+      // Celda codigo y version
       recB(ML + 340, y - hE, 80, hE, negro, 0.8, grisClaro);
-
-      // Línea divisoria horizontal en la mitad exacta
       lin(ML + 340, y - hE / 2, ML + 420, negro, 0.5);
-
-      // --- SECCIÓN SUPERIOR (CÓDIGO) ---
       txt("CÓDIGO", ML + 344, y - 8, { f: fontBold, s: 6.5, c: grisOsc });
       txt("STI-FOR-001", ML + 342, y - 17, { s: 7.5 });
-
-      // --- SECCIÓN INFERIOR (VERSIÓN) ---
-      // Se toma como referencia la mitad (y - hE / 2) hacia abajo
       txt("VERSIÓN", ML + 344, y - (hE / 2) - 8, { f: fontBold, s: 6.5, c: grisOsc });
       txt("1.0", ML + 355, y - (hE / 2) - 17, { s: 7.5 });
  
@@ -138,188 +137,237 @@ export async function POST(request) {
       recB(ML + 420, y - hE, AW - 420, hE, negro, 0.8);
       txtC("STI", ML + 420, y - hE / 2 - 5, AW - 420, { f: fontBold, s: 14, c: blanco });
  
-      y -= hE + 12;
+      y -= hE + 26;
     }
  
-    // Titulo de seccion con fondo rojo
+    // ============================================================
+    // PIE DE PAGINA (se dibuja en cada pagina, siempre abajo)
+    // ============================================================
+    function dibujarPie() {
+      const hPie  = 30;
+      const yBase = 40;
+      const cPie  = AW / 3;
+ 
+      rec(ML, yBase, AW, hPie, grisClaro);
+      recB(ML, yBase, AW, hPie, negro, 0.8);
+      linV(ML + cPie,     yBase, yBase + hPie, negro, 0.5);
+      linV(ML + cPie * 2, yBase, yBase + hPie, negro, 0.5);
+ 
+      const celdas = [
+        ["Elaborado por: ", "Sistemas & TI",         "Fecha: 20/10/2025"],
+        ["Revisado por: ",  "Jefe de Sistemas & TI", "Fecha de revisión: 20/10/2025"],
+        ["Aprobado por: ",  "Jefe de Sistemas & TI", "Fecha de aprobación: 20/10/2025"],
+      ];
+      celdas.forEach(([label, valor, fecha], i) => {
+        const x = ML + cPie * i + 4;
+        txt(label, x, yBase + 19, { f: fontBold, s: 7 });
+        txt(valor, x + fontBold.widthOfTextAtSize(label, 7), yBase + 19, { s: 7, c: grisOsc });
+        txt(fecha, x, yBase + 7, { s: 7, c: grisOsc });
+      });
+ 
+      // Linea roja inferior
+      rec(ML, yBase - 4, AW, 4, rojo);
+    }
+ 
+    // Cierra la pagina actual (dibuja su pie) y abre una nueva con su encabezado
+    function nuevaPagina() {
+      dibujarPie();
+      page = pdfDoc.addPage([PW, PH]);
+      y = MT;
+      dibujarEncabezado();
+    }
+ 
+    // Si el contenido no cabe en lo que queda de pagina, pasa a una nueva
+    function checkEspacio(necesario) {
+      if (y - necesario < MB) nuevaPagina();
+    }
+ 
+    // ============================================================
+    // COMPONENTES DE TABLA
+    // ============================================================
+    const hFila = 17;
+ 
+    // Titulo grande de bloque (texto rojo con linea roja debajo)
+    function tituloBloque(titulo) {
+      checkEspacio(30);
+      txt(titulo, ML, y, { f: fontBold, s: 10, c: rojo });
+      lin(ML, y - 3, MR, rojo, 1);
+      y -= 16;
+    }
+ 
+    // Encabezado de tabla con fondo rojo
     function seccion(titulo, alto = 17) {
-      checkEspacio(alto + 5);
+      checkEspacio(alto + hFila);
       rec(ML, y - alto, AW, alto, rojo);
       recB(ML, y - alto, AW, alto, negro, 0.8);
       txtC(titulo, ML, y - alto + 5, AW, { f: fontBold, s: 8.5, c: blanco });
       y -= alto;
     }
  
-    // Titulo de subseccion con fondo gris claro
+    // Subtitulo con fondo gris claro
     function subseccion(titulo, alto = 15) {
-      checkEspacio(alto + 5);
+      checkEspacio(alto + hFila);
       rec(ML, y - alto, AW, alto, grisClaro);
       recB(ML, y - alto, AW, alto, negro, 0.5);
-      txt(titulo, ML + 4, y - alto + 4, { f: fontBold, s: 7.5 });
+      txt(titulo, ML + 4, y - alto + 4, { f: fontBold, s: 9 });
       y -= alto;
     }
  
-    // Fila de datos con mejor espaciado (padding vertical)
-    const hFila = 17; // altura de fila aumentada para mejor legibilidad
- 
+    // Fila de una sola pareja etiqueta / valor
     function filaSimple(label, valor, anchoLabel = 110) {
       checkEspacio(hFila);
       recB(ML, y - hFila, AW, hFila, negro, 0.5);
       linV(ML + anchoLabel, y, y - hFila, negro, 0.5);
-      txt(label, ML + 4, y - hFila + 5, { f: fontBold, s: 7.5 });
-      txt(valor || "", ML + anchoLabel + 4, y - hFila + 5, { s: 7.5 });
+      txt(label, ML + 4, y - hFila + 5, { f: fontBold, s: 9 });
+      txt(valor || "", ML + anchoLabel + 4, y - hFila + 5, { s: 9 });
       y -= hFila;
     }
  
     // ============================================================
-    // INICIO DEL DOCUMENTO
+    // PAGINA 1: INFORMACION GENERAL + DESCRIPCION DEL EQUIPO
     // ============================================================
     dibujarEncabezado();
  
-    // ============================================================
-    // INFORMACION GENERAL
-    // ============================================================
-    txt("INFORMACIÓN GENERAL", ML, y, { f: fontBold, s: 10, c: rojo });
-    lin(ML, y - 3, MR, rojo, 1);
-    y -= 16;
+    tituloBloque("INFORMACIÓN GENERAL");
  
     seccion("RESPONSABLE DE LA ENTREGA");
  
-    // Fila: Ubicacion | Fecha entrega
     checkEspacio(hFila);
     recB(ML, y - hFila, AW, hFila, negro, 0.5);
-    linV(ML + 55, y, y - hFila, negro, 0.5);
+    linV(ML + 55,  y, y - hFila, negro, 0.5);
     linV(ML + 195, y, y - hFila, negro, 0.5);
     linV(ML + 295, y, y - hFila, negro, 0.5);
-    txt("Ubicación",      ML + 4,    y - hFila + 5, { f: fontBold, s: 7.5 });
-    txt(datos.ciudad_entrega || "", ML + 59, y - hFila + 5, { s: 7.5 });
-    txt("Fecha entrega",  ML + 199,  y - hFila + 5, { f: fontBold, s: 7.5 });
-    txt(datos.fecha_entrega || "",  ML + 299, y - hFila + 5, { s: 7.5 });
+    txt("Ubicación",     ML + 4,   y - hFila + 5, { f: fontBold, s: 9 });
+    txt(datos.ciudad_entrega || "", ML + 59,  y - hFila + 5, { s: 9 });
+    txt("Fecha entrega", ML + 199, y - hFila + 5, { f: fontBold, s: 9 });
+    txt(formatearFecha(datos.fecha_entrega), ML + 299, y - hFila + 5, { s: 9 });
     y -= hFila;
  
     filaSimple("Entregado por", datos.entregado_por, 85);
-    y -= 8;
+    y -= 10;
  
     seccion("INFORMACIÓN DEL USUARIO");
  
-    // Fila: Usuario | Cargo
     checkEspacio(hFila);
     recB(ML, y - hFila, AW, hFila, negro, 0.5);
-    linV(ML + 55, y, y - hFila, negro, 0.5);
+    linV(ML + 55,  y, y - hFila, negro, 0.5);
     linV(ML + 265, y, y - hFila, negro, 0.5);
     linV(ML + 310, y, y - hFila, negro, 0.5);
-    txt("Usuario",  ML + 4,   y - hFila + 5, { f: fontBold, s: 7.5 });
-    txt(datos.usuario_nombre || "", ML + 59, y - hFila + 5, { s: 7.5 });
-    txt("Cargo",    ML + 269, y - hFila + 5, { f: fontBold, s: 7.5 });
-    txt(datos.usuario_cargo || "", ML + 314, y - hFila + 5, { s: 7.5 });
+    txt("Usuario", ML + 4,   y - hFila + 5, { f: fontBold, s: 9 });
+    txt(datos.usuario_nombre || "", ML + 59,  y - hFila + 5, { s: 9 });
+    txt("Cargo",   ML + 269, y - hFila + 5, { f: fontBold, s: 9 });
+    txt(datos.usuario_cargo || "", ML + 314, y - hFila + 5, { s: 9 });
     y -= hFila;
  
-    // Fila: Identificacion CC | Area
     checkEspacio(hFila);
     recB(ML, y - hFila, AW, hFila, negro, 0.5);
-    linV(ML + 75, y, y - hFila, negro, 0.5);
+    linV(ML + 75,  y, y - hFila, negro, 0.5);
     linV(ML + 100, y, y - hFila, negro, 0.5);
     linV(ML + 215, y, y - hFila, negro, 0.5);
     linV(ML + 250, y, y - hFila, negro, 0.5);
-    txt("Identificación", ML + 4,   y - hFila + 5, { f: fontBold, s: 7.5 });
-    txt("C.C.",           ML + 79,  y - hFila + 5, { s: 7.5 });
-    txt(datos.usuario_cedula || "", ML + 104, y - hFila + 5, { s: 7.5 });
-    txt("Área",           ML + 219, y - hFila + 5, { f: fontBold, s: 7.5 });
-    txt(datos.usuario_area || "", ML + 254, y - hFila + 5, { s: 7.5 });
+    txt("Identificación", ML + 4,   y - hFila + 5, { f: fontBold, s: 9 });
+    txt("C.C.",           ML + 79,  y - hFila + 5, { s: 9 });
+    txt(datos.usuario_cedula || "", ML + 104, y - hFila + 5, { s: 9 });
+    txt("Área",           ML + 219, y - hFila + 5, { f: fontBold, s: 9 });
+    txt(datos.usuario_area || "", ML + 254, y - hFila + 5, { s: 9 });
     y -= hFila;
  
     filaSimple("Correo corporativo", datos.usuario_correo, 115);
-    y -= 10;
+    y -= 14;
  
-    // ============================================================
-    // DESCRIPCION DEL EQUIPO
-    // ============================================================
-    txt("DESCRIPCIÓN DEL EQUIPO", ML, y, { f: fontBold, s: 10, c: rojo });
-    lin(ML, y - 3, MR, rojo, 1);
-    y -= 16;
+    // --- DESCRIPCION DEL EQUIPO ---
+    tituloBloque("DESCRIPCIÓN DEL EQUIPO");
  
     seccion("INFORMACIÓN DEL DISPOSITIVO");
  
     const sep = ML + 278;
     const filasDisp = [
-      ["Tipo",          datos.tipo || "",               "Procesador",       datos.procesador || ""],
-      ["Marca",         datos.marca || "",              "Memoria RAM",      datos.memoria_ram || ""],
-      ["Modelo",        datos.modelo || "",             "Almacenamiento",   datos.almacenamiento || ""],
-      ["Serial",        datos.serial || "",             "IMEI 1",           datos.imei_1 || ""],
-      ["Hostname",      datos.hostname || "",           "IMEI 2",           datos.imei_2 || ""],
-      ["S.O.",          datos.sistema_operativo || "",  "Usuario anterior", datos.usuario_anterior || ""],
-      ["Versión S.O.",  datos.version_so || "",         "",                 ""],
+      ["Tipo",         datos.tipo,              "Procesador",        datos.procesador],
+      ["Marca",        datos.marca,             "Memoria RAM",       datos.memoria_ram],
+      ["Modelo",       datos.modelo,            "Almacenamiento",    datos.almacenamiento],
+      ["Serial",       datos.serial,            "IMEI 1",            datos.imei_1],
+      ["Hostname",     datos.hostname,          "IMEI 2",            datos.imei_2],
+      ["S.O.",         datos.sistema_operativo, "Usuario anterior:", datos.usuario_anterior],
+      ["Versión S.O.", datos.version_so,        "",                  ""],
     ];
  
     filasDisp.forEach(([l1, v1, l2, v2]) => {
       checkEspacio(hFila);
       recB(ML, y - hFila, AW, hFila, negro, 0.5);
       linV(sep, y, y - hFila, negro, 0.5);
-      txt(l1, ML + 4,  y - hFila + 5, { f: fontBold, s: 7.5 });
-      txt(v1, ML + 65, y - hFila + 5, { s: 7.5 });
+      txt(l1, ML + 4,  y - hFila + 5, { f: fontBold, s: 9 });
+      txt(v1, ML + 65, y - hFila + 5, { s: 9 });
       if (l2) {
-        txt(l2, sep + 4,  y - hFila + 5, { f: fontBold, s: 7.5 });
-        txt(v2, sep + 95, y - hFila + 5, { s: 7.5 });
+        txt(l2, sep + 4,  y - hFila + 5, { f: fontBold, s: 9 });
+        txt(v2, sep + 95, y - hFila + 5, { s: 9 });
       }
       y -= hFila;
     });
  
-    y -= 8;
+    y -= 10;
  
     // --- ELEMENTOS ADICIONALES ---
     seccion("INFORMACIÓN DE ELEMENTOS ADICIONALES");
  
-    const colP  = [ML, ML + 125, ML + 280, ML + 400];
-    const ancP  = [125, 155, 120, AW - 365];
+    const colP = [ML, ML + 125, ML + 280, ML + 400];
+    const ancP = [125, 155, 120, AW - 365];
  
-    // Encabezado tabla perifericos
     rec(ML, y - hFila, AW, hFila, grisClaro);
     recB(ML, y - hFila, AW, hFila, negro, 0.5);
     ["Periféricos", "Serial", "Marca", "Modelo"].forEach((t, i) => {
       if (i > 0) linV(colP[i], y, y - hFila, negro, 0.5);
-      txtC(t, colP[i], y - hFila + 5, ancP[i], { f: fontBold, s: 7.5 });
+      txtC(t, colP[i], y - hFila + 5, ancP[i], { f: fontBold, s: 9 });
     });
     y -= hFila;
  
-    const tiposFijos = ["Mouse", "Teclado", "Monitor", "Cargador", "Audífonos"];
+    // Filas fijas del formato (Mouse, Teclado, Monitor, Cargador, Audifonos)
+    // y debajo cualquier otro periferico (o un segundo del mismo tipo)
+    const tiposFijos  = ["Mouse", "Teclado", "Monitor", "Cargador", "Audífonos"];
     const perifericos = datos.perifericos || [];
-    const filasPerif = [
-      ...tiposFijos.map((tipo) => {
-        const p = perifericos.find(p => p.tipo === tipo || p.tipo === tipo.replace("í","i"));
-        return { tipo, serial: p?.serial || "N/A", marca: p?.marca || "N/A", modelo: p?.modelo || "N/A" };
-      }),
-      ...perifericos
-        .filter(p => !tiposFijos.includes(p.tipo) && !tiposFijos.map(t=>t.replace("í","i")).includes(p.tipo))
-        .map(p => ({ tipo: p.tipo, serial: p.serial||"N/A", marca: p.marca||"N/A", modelo: p.modelo||"N/A" })),
-    ];
+    const usados      = new Set();
+    const filasPerif  = [];
+ 
+    tiposFijos.forEach((tipo) => {
+      const idx = perifericos.findIndex((p, i) => !usados.has(i) && norm(p.tipo) === norm(tipo));
+      if (idx >= 0) {
+        usados.add(idx);
+        const p = perifericos[idx];
+        filasPerif.push({ tipo, serial: p.serial || "N/A", marca: p.marca || "N/A", modelo: p.modelo || "N/A" });
+      } else {
+        filasPerif.push({ tipo, serial: "N/A", marca: "N/A", modelo: "N/A" });
+      }
+    });
+    perifericos.forEach((p, i) => {
+      if (!usados.has(i)) {
+        filasPerif.push({ tipo: p.tipo, serial: p.serial || "N/A", marca: p.marca || "N/A", modelo: p.modelo || "N/A" });
+      }
+    });
  
     filasPerif.forEach((f, idx) => {
       checkEspacio(hFila);
       if (idx % 2 === 0) rec(ML, y - hFila, AW, hFila, rgb(0.97, 0.97, 0.97));
       recB(ML, y - hFila, AW, hFila, negro, 0.5);
       colP.forEach((x, i) => { if (i > 0) linV(x, y, y - hFila, negro, 0.5); });
-      txt(f.tipo,   colP[0]+4, y-hFila+5, { s: 7.5 });
-      txt(f.serial, colP[1]+4, y-hFila+5, { s: 7.5 });
-      txt(f.marca,  colP[2]+4, y-hFila+5, { s: 7.5 });
-      txt(f.modelo, colP[3]+4, y-hFila+5, { s: 7.5 });
+      txt(f.tipo,   colP[0] + 4, y - hFila + 5, { s: 9 });
+      txt(f.serial, colP[1] + 4, y - hFila + 5, { s: 9 });
+      txt(f.marca,  colP[2] + 4, y - hFila + 5, { s: 9 });
+      txt(f.modelo, colP[3] + 4, y - hFila + 5, { s: 9 });
       y -= hFila;
     });
  
     subseccion("Software");
-    filaSimple("Licencia Office",    datos.licencia_office || "",    110);
-    filaSimple("Antivirus",          datos.antivirus || "",          110);
-    filaSimple("Software Corporativo", datos.software_corporativo || "", 110);
-    y -= 12;
+    filaSimple("Licencia Office",      datos.licencia_office,      110);
+    filaSimple("Antivirus",            datos.antivirus,            110);
+    filaSimple("Software Corporativo", datos.software_corporativo, 110);
  
     // ============================================================
-    // CONDICIONES DE USO
+    // PAGINA 2: CONDICIONES DE USO
     // ============================================================
-    checkEspacio(60);
-    txt("CONDICIONES DE USO", ML, y, { f: fontBold, s: 10, c: rojo });
-    lin(ML, y - 3, MR, rojo, 1);
-    y -= 16;
-    txt("El empleado que recibe este equipo se compromete a:", ML, y, { s: 8, c: grisOsc });
-    y -= 14;
+    nuevaPagina();
+ 
+    tituloBloque("CONDICIONES DE USO");
+    txt("El empleado que recibe este equipo se compromete a:", ML, y, { s: 9, c: negro });
+    y -= 22;
  
     const condiciones = [
       "No retirar o adicionar periféricos o dispositivos internos o externos; no desarmar o destapar el equipo.",
@@ -329,64 +377,39 @@ export async function POST(request) {
       "No utilizar el equipo para realizar trabajos ajenos a TRIENERGY o almacenar información no relacionada con los asuntos de esta.",
       "Utilizar según las políticas de seguridad de la información.",
       "Respecto al derecho de la Privacidad de la Información, se indica que TRIENERGY puede hacer uso de las claves de acceso para la investigación o búsqueda de archivos.",
-      "Cuando requiera algún tipo de servicio relacionado con el funcionamiento del equipo, requerirlo únicamente con el departamento de STI.",
+      "Cuando requiera algún tipo de servicio relacionado con el funcionamiento del equipo, aplicaciones o en caso de tener un requerimiento o incidente con algún servicio prestado por el departamento de STI, por favor requerirlo únicamente con el departamento de STI.",
       "Devolver el equipo al departamento de STI por motivo de cambio de equipo o retiro de la Empresa, en las mismas condiciones especificadas en esta Acta.",
       "Garantizar que únicamente el personal autorizado por el departamento de STI puede adicionar o retirar componentes al equipo.",
-      "Cualquier modificación a la configuración del equipo descrita en esta Acta, requiere la modificación o anulación del Acta y la generación de una nueva Acta de Entrega.",
+      "Cualquier modificación a la configuración del equipo descrita en esta Acta, requiere la modificación o anulación del Acta y la generación de una nueva Acta de Entrega donde se reflejen los cambios.",
     ];
  
     condiciones.forEach((c) => {
-      const lineasEstimadas = Math.ceil((c.length * 5.5) / (AW - 20));
-      checkEspacio(lineasEstimadas * 12 + 6);
-      y = multilinea("•  " + c, ML + 6, y, AW - 16, { s: 7.5, lh: 11, c: grisOsc });
-      y -= 5;
+      y = multilinea("•  " + c, ML + 6, y, AW - 16, { s: 9, lh: 13, c: negro });
+      y -= 9;
     });
  
-    y -= 12;
- 
     // ============================================================
-    // ACEPTACION Y AUTORIZACION
+    // PAGINA 3: ACEPTACION Y AUTORIZACION + FIRMA
     // ============================================================
-    checkEspacio(100);
-    txt("ACEPTACIÓN Y AUTORIZACIÓN", ML, y, { f: fontBold, s: 10, c: rojo });
-    lin(ML, y - 3, MR, rojo, 1);
-    y -= 16;
+    nuevaPagina();
  
-    const textoAcep = "Declaro haber recibido el equipo aquí descrito a entera satisfacción, conocer las CONDICIONES DE USO y aceptarlas; en consecuencia, me hago responsable del mismo durante el tiempo que esté a mi cargo. Si llegado el momento de la devolución, faltara alguno de sus componentes o estuviera deteriorado o dañado por causas diferentes al uso normal, expresamente autorizo a la Empresa para que descuente su valor de lo que se me adeude por concepto de salarios, prestaciones sociales, vacaciones, indemnizaciones, auxilios, bonificaciones o cualquier otro pago al que tuviera derecho. En caso de hurto calificado debo reportar ante el departamento de TI y presentar carta de lo sucedido y denuncio ante la Fiscalía.";
-    y = multilinea(textoAcep, ML, y, AW, { s: 8, lh: 12, c: grisOsc });
-    y -= 18;
+    tituloBloque("ACEPTACIÓN Y AUTORIZACIÓN");
+    y -= 4;
  
-    checkEspacio(80);
-    txt("Firma Aceptación,", ML, y, { f: fontBold, s: 8.5 });
-    y -= 40;
-    lin(ML, y, ML + 200, negro, 0.8);
-    y -= 13;
-    txt("C.C. " + (datos.usuario_cedula || ""), ML, y, { s: 8, c: grisOsc });
+    const textoAcep = "Declaro haber recibido el equipo aquí descrito a entera satisfacción, conocer las CONDICIONES DE USO y aceptarlas; en consecuencia, me hago responsable del mismo durante el tiempo que esté a mi cargo. Si llegado el momento de la devolución, faltara alguno de sus componentes o estuviera deteriorado o dañado por causas diferentes al uso normal, expresamente autorizo a la Empresa para que descuente su valor de lo que se me adeude por concepto de salarios, prestaciones sociales, vacaciones, indemnizaciones, auxilios, bonificaciones o cualquier otro pago al que tuviera derecho. En caso de hurto calificado debo reportar ante el departamento de TI y presentar carta de lo sucedido y denuncio ante la Fiscalía. De la misma forma, entiendo que la violación a cualquiera de las CONDICIONES DE USO contenidas en este documento constituye una falta grave que producirá las consecuencias previstas en el reglamento interno de trabajo.";
+    y = multilinea(textoAcep, ML, y, AW, { s: 9, lh: 15, c: negro });
+    y -= 30;
+ 
+    txt("Firma Aceptación,", ML, y, { f: fontBold, s: 11 });
+    y -= 50;
+    lin(ML, y, ML + 220, negro, 0.8);
     y -= 14;
-    txt(datos.usuario_nombre || "", ML, y, { f: fontBold, s: 8.5 });
-    y -= 22;
+    txt("C.C. " + (datos.usuario_cedula || ""), ML, y, { s: 9, c: negro });
+    y -= 14;
+    txt(datos.usuario_nombre || "", ML, y, { f: fontBold, s: 9.5 });
  
-    // ============================================================
-    // PIE DE PAGINA
-    // ============================================================
-    checkEspacio(32);
-    const hPie = 30;
-    const cPie = AW / 3;
- 
-    rec(ML, y - hPie, AW, hPie, grisClaro);
-    recB(ML, y - hPie, AW, hPie, negro, 0.8);
-    linV(ML + cPie,     y, y - hPie, negro, 0.5);
-    linV(ML + cPie * 2, y, y - hPie, negro, 0.5);
- 
-    txt("Elaborado por:",  ML + 4,           y - 10, { f: fontBold, s: 7 });
-    txt("Sistemas & TI",   ML + 4,           y - 20, { s: 7, c: grisOsc });
-    txt("Revisado por:",   ML + cPie + 4,    y - 10, { f: fontBold, s: 7 });
-    txt("Jefe de STI",     ML + cPie + 4,    y - 20, { s: 7, c: grisOsc });
-    txt("Aprobado por:",   ML + cPie*2 + 4,  y - 10, { f: fontBold, s: 7 });
-    txt("Jefe de STI",     ML + cPie*2 + 4,  y - 20, { s: 7, c: grisOsc });
- 
-    // Linea roja inferior
-    rec(ML, y - hPie - 4, AW, 4, rojo);
+    // Pie de la ultima pagina
+    dibujarPie();
  
     // ============================================================
     // GENERAR PDF
