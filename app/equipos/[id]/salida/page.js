@@ -18,12 +18,20 @@ export default function SalidaEquipo({ params: paramsPromise }) {
   const [pasoActual, setPasoActual] = useState("");
   const [error, setError] = useState("");
  
+  // Avisos que aparecen si la salida SI se registro pero algun paso final fallo
+  // Evita que el usuario vuelva a presionar "Registrar salida" y duplique el registro
+  const [avisosPostGuardado, setAvisosPostGuardado] = useState([]);
+ 
   const [perifericosEquipo, setPerifericosEquipo] = useState([]);
   const [perifericosDisponibles, setPerifericosDisponibles] = useState([]);
   const [busquedaPeriferico, setBusquedaPeriferico] = useState("");
   const [mostrarModalVincular, setMostrarModalVincular] = useState(false);
   const [perifericosSeleccionados, setPerifericosSeleccionados] = useState([]);
   const [perifericosNuevos, setPerifericosNuevos] = useState([]);
+ 
+  // IDs de los perifericos vinculados que NO se entregan en esta salida
+  // Se desvinculan del equipo solo cuando se confirma "Registrar salida"
+  const [noEntregar, setNoEntregar] = useState([]);
  
   const [salida, setSalida] = useState({
     usuario_nombre: "",
@@ -42,7 +50,6 @@ export default function SalidaEquipo({ params: paramsPromise }) {
   // --- CARGA INICIAL ---
   useEffect(() => {
     async function cargarDatos() {
-      // Traemos todos los campos del equipo incluyendo ultimo_usuario
       const { data: equipoData } = await supabase
         .from("equipos")
         .select("*")
@@ -82,7 +89,17 @@ export default function SalidaEquipo({ params: paramsPromise }) {
     setSalida((prev) => ({ ...prev, [name]: value }));
   }
  
-  // --- SELECCIONAR PERIFERICO EXISTENTE ---
+  // --- MARCAR / DESMARCAR "NO ENTREGAR" ---
+  // Solo cambia el estado local, no toca la base de datos
+  function alternarNoEntregar(perifericoId) {
+    setNoEntregar((prev) =>
+      prev.includes(perifericoId)
+        ? prev.filter((x) => x !== perifericoId)
+        : [...prev, perifericoId]
+    );
+  }
+ 
+  // --- SELECCIONAR PERIFERICO EXISTENTE DEL INVENTARIO ---
   function seleccionarPeriferico(periferico) {
     if (perifericosSeleccionados.find((p) => p.id === periferico.id)) return;
     setPerifericosSeleccionados((prev) => [...prev, periferico]);
@@ -169,16 +186,19 @@ export default function SalidaEquipo({ params: paramsPromise }) {
       return;
     }
  
-    // Lista completa de perifericos para los documentos
+    // Separamos los perifericos vinculados en: los que SI se entregan y los que NO
+    const equipoEntregados = perifericosEquipo.filter((p) => !noEntregar.includes(p.id));
+    const equipoDesvincular = perifericosEquipo.filter((p) => noEntregar.includes(p.id));
+ 
+    // Lista final de perifericos que salen con el equipo
+    // Se usa para el acta, para el registro de la salida y para el historial
     const todosLosPerifericos = [
-      ...perifericosEquipo,
+      ...equipoEntregados,
       ...perifericosSeleccionados,
       ...perifericosNuevos.filter((p) => p.marca),
     ];
  
     // Datos para los PDFs
-    // usuario_anterior: primero intentamos usuario_actual (si el equipo esta entregado)
-    // si no, usamos ultimo_usuario (el que tenia antes del ultimo reingreso)
     const datosPDF = {
       tipo: equipo.tipo,
       marca: equipo.marca,
@@ -195,7 +215,6 @@ export default function SalidaEquipo({ params: paramsPromise }) {
       licencia_office: equipo.licencia_office,
       antivirus: equipo.antivirus,
       software_corporativo: equipo.software_corporativo || "",
-      // Tomamos el usuario anterior del campo actual o del ultimo guardado al reingresar
       usuario_anterior: equipo.usuario_actual || equipo.ultimo_usuario || "N/A",
       usuario_nombre: salida.usuario_nombre,
       usuario_correo: salida.usuario_correo,
@@ -212,7 +231,7 @@ export default function SalidaEquipo({ params: paramsPromise }) {
     const timestamp = Date.now();
     const nombreBase = `${equipo.serial}_${timestamp}`;
  
-    // PASO 1: Generamos el acta de entrega
+    // PASO 1: Acta de entrega
     setPasoActual("Generando acta de entrega...");
     const urlActa = await generarYSubirPDF(
       "/api/generar-acta",
@@ -220,7 +239,7 @@ export default function SalidaEquipo({ params: paramsPromise }) {
       `actas/${nombreBase}_acta.pdf`
     );
  
-    // PASO 2: Generamos la carta de autorizacion
+    // PASO 2: Carta de autorizacion
     setPasoActual("Generando carta de autorizacion...");
     const urlCarta = await generarYSubirPDF(
       "/api/generar-carta",
@@ -228,7 +247,7 @@ export default function SalidaEquipo({ params: paramsPromise }) {
       `cartas/${nombreBase}_carta.pdf`
     );
  
-    // PASO 3: Guardamos el registro de salida con las URLs de los documentos
+    // PASO 3: Registro de salida con las URLs de los documentos
     setPasoActual("Guardando registro de salida...");
     const { data: salidaGuardada, error: errorSalida } = await supabase
       .from("registros_salida")
@@ -259,9 +278,14 @@ export default function SalidaEquipo({ params: paramsPromise }) {
       return;
     }
  
+    // A partir de aqui la salida YA esta registrada.
+    // Si algun paso siguiente falla, lo guardamos como aviso en lugar de abortar,
+    // para que el usuario sepa exactamente que quedo pendiente.
+    const avisos = [];
+ 
     // PASO 4: Actualizamos el equipo
     setPasoActual("Actualizando equipo...");
-    await supabase
+    const { error: errorEquipo } = await supabase
       .from("equipos")
       .update({
         estado: "Entregado",
@@ -270,15 +294,18 @@ export default function SalidaEquipo({ params: paramsPromise }) {
         propietario_cedula: salida.usuario_cedula,
         propietario_correo: salida.usuario_correo,
         hostname_actual: salida.nuevo_hostname || equipo.hostname_actual,
-        // Limpiamos ultimo_usuario ya que ahora tiene un usuario activo nuevo
         ultimo_usuario: null,
         updated_at: new Date().toISOString(),
       })
       .eq("id", id);
  
-    // PASO 5: Guardamos snapshot de perifericos
+    if (errorEquipo) {
+      avisos.push("No se pudo actualizar el estado del equipo a Entregado: " + errorEquipo.message);
+    }
+ 
+    // PASO 5: Snapshot de los perifericos que SI salieron (excluye los "No entregar")
     const snapshotPerifericos = [
-      ...perifericosEquipo.map((p) => ({
+      ...equipoEntregados.map((p) => ({
         salida_id: salidaGuardada.id,
         periferico_id: p.id,
         tipo: p.tipo, marca: p.marca, modelo: p.modelo, serial: p.serial,
@@ -296,35 +323,114 @@ export default function SalidaEquipo({ params: paramsPromise }) {
     ];
  
     if (snapshotPerifericos.length > 0) {
-      await supabase.from("salida_perifericos").insert(snapshotPerifericos);
+      const { error: errorSnapshot } = await supabase
+        .from("salida_perifericos")
+        .insert(snapshotPerifericos);
+      if (errorSnapshot) {
+        avisos.push("No se pudo guardar la lista de perifericos entregados: " + errorSnapshot.message);
+      }
     }
  
-    // PASO 6: Vinculamos perifericos seleccionados al equipo
+    // PASO 6: Vinculamos al equipo los perifericos seleccionados del inventario
     if (perifericosSeleccionados.length > 0) {
-      await supabase
+      const { error: errorVincular } = await supabase
         .from("perifericos")
         .update({ equipo_id: id })
         .in("id", perifericosSeleccionados.map((p) => p.id));
+      if (errorVincular) {
+        avisos.push("No se pudieron vincular los perifericos del inventario: " + errorVincular.message);
+      }
     }
  
-    // PASO 7: Guardamos perifericos nuevos
+    // PASO 7: Guardamos los perifericos nuevos vinculados al equipo
     const nuevosParaGuardar = perifericosNuevos
       .filter((p) => p.marca)
       .map((p) => ({ ...p, equipo_id: id }));
  
     if (nuevosParaGuardar.length > 0) {
-      await supabase.from("perifericos").insert(nuevosParaGuardar);
+      const { error: errorNuevos } = await supabase
+        .from("perifericos")
+        .insert(nuevosParaGuardar);
+      if (errorNuevos) {
+        avisos.push("No se pudieron guardar los perifericos nuevos: " + errorNuevos.message);
+      }
+    }
+ 
+    // PASO 8: Desvinculamos los perifericos marcados "No entregar"
+    // Quedan sin equipo asignado y disponibles en el inventario
+    if (equipoDesvincular.length > 0) {
+      setPasoActual("Desvinculando perifericos no entregados...");
+      const idsDesvincular = equipoDesvincular.map((p) => p.id);
+ 
+      const { error: errorDesvincular } = await supabase
+        .from("perifericos")
+        .update({ equipo_id: null })
+        .in("id", idsDesvincular);
+ 
+      if (errorDesvincular) {
+        avisos.push("No se pudieron desvincular los perifericos no entregados: " + errorDesvincular.message);
+      } else {
+        // Registramos cada desvinculacion en el historial del periferico
+        const { error: errorHistorial } = await supabase
+          .from("periferico_historial")
+          .insert(
+            idsDesvincular.map((perifericoId) => ({
+              periferico_id: perifericoId,
+              equipo_id: null,
+              fecha_desde: new Date().toISOString(),
+              motivo: "Desvinculacion en salida",
+            }))
+          );
+        if (errorHistorial) {
+          avisos.push("Los perifericos se desvincularon, pero no se pudo guardar el historial: " + errorHistorial.message);
+        }
+      }
     }
  
     setPasoActual("");
-    router.push(`/equipos/${id}`);
+ 
+    // Si todo salio bien, volvemos al equipo. Si no, mostramos que quedo pendiente.
+    if (avisos.length === 0) {
+      router.push(`/equipos/${id}`);
+    } else {
+      setAvisosPostGuardado(avisos);
+      setGuardando(false);
+    }
   }
  
   if (loading) return <div className="text-center py-20 text-gray-400">Cargando...</div>;
   if (!equipo) return <div className="text-center py-20 text-red-500">Equipo no encontrado.</div>;
  
+  // Si la salida se registro pero algun paso final fallo, reemplazamos el formulario por este aviso
+  // Asi el usuario no vuelve a registrar la misma salida por error
+  if (avisosPostGuardado.length > 0) {
+    return (
+      <div className="max-w-3xl mx-auto">
+        <div className="bg-yellow-50 border border-yellow-300 rounded-xl p-6">
+          <p className="text-lg font-semibold text-yellow-800 mb-2">
+            ⚠️ La salida se registro, pero quedaron pasos pendientes
+          </p>
+          <p className="text-sm text-yellow-700 mb-4">
+            El registro de la salida y los documentos ya se guardaron. No vuelvas a registrar la salida.
+            Revisa lo siguiente en el equipo:
+          </p>
+          <ul className="text-sm text-yellow-800 space-y-2 mb-6 list-disc pl-5">
+            {avisosPostGuardado.map((a, i) => <li key={i}>{a}</li>)}
+          </ul>
+          <a href={`/equipos/${id}`}
+            className="inline-block px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors">
+            Ir al equipo
+          </a>
+        </div>
+      </div>
+    );
+  }
+ 
   const esMovil = equipo.tipo === "Celular" || equipo.tipo === "Tablet";
   const puedeRegistrarSalida = equipo.estado === "En reserva";
+ 
+  // Cantidad de perifericos vinculados que si se entregan
+  const cantidadEntregados = perifericosEquipo.length - noEntregar.length;
  
   const perifericosDisponiblesFiltrados = perifericosDisponibles
     .filter((p) => !perifericosSeleccionados.find((s) => s.id === p.id))
@@ -493,21 +599,55 @@ export default function SalidaEquipo({ params: paramsPromise }) {
               🖱 Perifericos para esta entrega
             </h2>
  
+            {/* Perifericos vinculados al equipo: cada uno se puede marcar como "No entregar" */}
             {perifericosEquipo.length > 0 && (
               <div className="mb-5">
-                <p className="text-xs font-semibold text-gray-500 mb-2">
-                  Vinculados al equipo (se incluyen automaticamente):
+                <p className="text-xs font-semibold text-gray-500 mb-1">
+                  Vinculados al equipo ({cantidadEntregados} de {perifericosEquipo.length} se entregan):
                 </p>
-                <div className="flex flex-wrap gap-2">
-                  {perifericosEquipo.map((p) => (
-                    <span key={p.id} className="text-xs bg-purple-50 text-purple-700 px-3 py-1.5 rounded-full border border-purple-200">
-                      {p.tipo} - {p.marca} {p.serial ? `(${p.serial})` : ""}
-                    </span>
-                  ))}
+                <p className="text-xs text-gray-400 mb-3">
+                  Marca "No entregar" en los que no salen con el equipo. Se desvincularan al registrar la salida.
+                </p>
+                <div className="space-y-2">
+                  {perifericosEquipo.map((p) => {
+                    const excluido = noEntregar.includes(p.id);
+                    return (
+                      <div key={p.id}
+                        className={`flex items-center justify-between rounded-lg px-3 py-2 border transition-colors ${
+                          excluido
+                            ? "bg-red-50 border-red-200"
+                            : "bg-purple-50 border-purple-200"
+                        }`}>
+                        <div className={excluido ? "opacity-60" : ""}>
+                          <span className={`text-xs font-semibold ${excluido ? "text-red-600" : "text-purple-600"}`}>
+                            {p.tipo}
+                          </span>
+                          {/* Tachado cuando esta marcado como "No entregar" */}
+                          <p className={`text-sm ${excluido ? "text-red-800 line-through" : "text-purple-800"}`}>
+                            {p.marca} {p.modelo || ""} {p.serial ? `(${p.serial})` : ""}
+                          </p>
+                          {excluido && (
+                            <p className="text-xs text-red-600 mt-0.5 no-underline">
+                              No se entrega. Se desvinculara del equipo al registrar la salida.
+                            </p>
+                          )}
+                        </div>
+                        <button type="button" onClick={() => alternarNoEntregar(p.id)}
+                          className={`text-xs font-medium ml-3 whitespace-nowrap px-3 py-1.5 rounded-lg transition-colors ${
+                            excluido
+                              ? "bg-white border border-red-300 text-red-600 hover:bg-red-100"
+                              : "bg-white border border-gray-300 text-gray-600 hover:bg-gray-50"
+                          }`}>
+                          {excluido ? "↩ Deshacer" : "No entregar"}
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             )}
  
+            {/* Perifericos del inventario seleccionados */}
             {perifericosSeleccionados.length > 0 && (
               <div className="mb-5">
                 <p className="text-xs font-semibold text-gray-500 mb-2">Del inventario seleccionados:</p>
@@ -528,6 +668,7 @@ export default function SalidaEquipo({ params: paramsPromise }) {
               </div>
             )}
  
+            {/* Perifericos nuevos */}
             {perifericosNuevos.length > 0 && (
               <div className="mb-5">
                 <p className="text-xs font-semibold text-gray-500 mb-2">Perifericos nuevos:</p>
