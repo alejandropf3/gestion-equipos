@@ -18,6 +18,14 @@ export default function ReingresaEquipo({ params: paramsPromise }) {
   // Perifericos vinculados al equipo actualmente
   const [perifericosEquipo, setPerifericosEquipo] = useState([]);
  
+  // IDs de los perifericos vinculados que NO regresan con el equipo
+  // Por defecto todos regresan; solo se marcan los que faltan
+  const [noRegresa, setNoRegresa] = useState([]);
+ 
+  // Avisos si el reingreso se registro pero algun paso final fallo
+  // Evita que el usuario vuelva a confirmar y duplique el registro
+  const [avisosPostGuardado, setAvisosPostGuardado] = useState([]);
+ 
   // --- DATOS DEL FORMULARIO DE REINGRESO ---
   const [reingreso, setReingreso] = useState({
     recibido_por: "",
@@ -62,6 +70,16 @@ export default function ReingresaEquipo({ params: paramsPromise }) {
     setReingreso((prev) => ({ ...prev, [name]: value }));
   }
  
+  // --- MARCAR / DESMARCAR "NO REGRESO" ---
+  // Solo cambia el estado local, no toca la base de datos hasta confirmar el reingreso
+  function alternarNoRegresa(perifericoId) {
+    setNoRegresa((prev) =>
+      prev.includes(perifericoId)
+        ? prev.filter((x) => x !== perifericoId)
+        : [...prev, perifericoId]
+    );
+  }
+ 
   // --- GUARDAR REINGRESO ---
   async function guardar(e) {
     e.preventDefault();
@@ -87,7 +105,7 @@ export default function ReingresaEquipo({ params: paramsPromise }) {
     }
  
     // 1. Guardamos el registro de reingreso en registros_ingreso
-    const { error: errorIngreso } = await supabase
+    const { data: ingresoGuardado, error: errorIngreso } = await supabase
       .from("registros_ingreso")
       .insert([{
         equipo_id: id,
@@ -100,7 +118,9 @@ export default function ReingresaEquipo({ params: paramsPromise }) {
         propietario_cedula: equipo.propietario_cedula,
         propietario_correo: equipo.propietario_correo,
         observaciones: reingreso.observaciones,
-      }]);
+      }])
+      .select()
+      .single();
  
     if (errorIngreso) {
       setError("Error al registrar el reingreso: " + errorIngreso.message);
@@ -108,10 +128,39 @@ export default function ReingresaEquipo({ params: paramsPromise }) {
       return;
     }
  
-    // 2. Actualizamos el estado del equipo a En reserva y limpiamos el usuario actual
+    // A partir de aqui el reingreso YA esta registrado.
+    // Si un paso siguiente falla, se guarda como aviso en lugar de abortar,
+    // para que el usuario sepa que quedo pendiente y no duplique el registro
+    const avisos = [];
+ 
+    // Separamos los perifericos vinculados: los que regresan y los que no
+    const regresan = perifericosEquipo.filter((p) => !noRegresa.includes(p.id));
+    const faltantes = perifericosEquipo.filter((p) => noRegresa.includes(p.id));
+ 
+    // 2. Guardamos los perifericos con los que regresa el equipo en este ingreso
+    // (antes este paso no existia, por eso el historial del reingreso quedaba vacio)
+    if (regresan.length > 0) {
+      const { error: errorPerifericos } = await supabase
+        .from("ingreso_perifericos")
+        .insert(
+          regresan.map((p) => ({
+            ingreso_id: ingresoGuardado.id,
+            periferico_id: p.id,
+            tipo: p.tipo,
+            marca: p.marca,
+            modelo: p.modelo,
+            serial: p.serial,
+          }))
+        );
+      if (errorPerifericos) {
+        avisos.push("No se pudo guardar la lista de perifericos que regresan: " + errorPerifericos.message);
+      }
+    }
+ 
+    // 3. Actualizamos el estado del equipo a En reserva y limpiamos el usuario actual
     // Guardamos en ultimo_usuario quien era el responsable antes de limpiar
     // Esto permite que la proxima salida sepa quien fue el ultimo usuario
-    await supabase
+    const { error: errorEquipo } = await supabase
       .from("equipos")
       .update({
         estado: "En reserva",
@@ -124,8 +173,46 @@ export default function ReingresaEquipo({ params: paramsPromise }) {
       })
       .eq("id", id);
  
-    // 3. Redirigimos a la inspeccion del equipo
-    router.push(`/equipos/${id}`);
+    if (errorEquipo) {
+      avisos.push("No se pudo actualizar el estado del equipo a En reserva: " + errorEquipo.message);
+    }
+ 
+    // 4. Desvinculamos los perifericos que no regresaron
+    // Dejan de estar asociados al equipo y quedan registrados en su historial
+    if (faltantes.length > 0) {
+      const idsFaltantes = faltantes.map((p) => p.id);
+ 
+      const { error: errorDesvincular } = await supabase
+        .from("perifericos")
+        .update({ equipo_id: null })
+        .in("id", idsFaltantes);
+ 
+      if (errorDesvincular) {
+        avisos.push("No se pudieron desvincular los perifericos que no regresaron: " + errorDesvincular.message);
+      } else {
+        const { error: errorHistorial } = await supabase
+          .from("periferico_historial")
+          .insert(
+            idsFaltantes.map((perifericoId) => ({
+              periferico_id: perifericoId,
+              equipo_id: null,
+              fecha_desde: new Date().toISOString(),
+              motivo: "Desvinculacion en reingreso",
+            }))
+          );
+        if (errorHistorial) {
+          avisos.push("Los perifericos se desvincularon, pero no se pudo guardar el historial: " + errorHistorial.message);
+        }
+      }
+    }
+ 
+    // 5. Si todo salio bien volvemos al equipo; si no, mostramos que quedo pendiente
+    if (avisos.length === 0) {
+      router.push(`/equipos/${id}`);
+    } else {
+      setAvisosPostGuardado(avisos);
+      setGuardando(false);
+    }
   }
  
   // --- FORMATO DE FECHA ---
@@ -140,7 +227,33 @@ export default function ReingresaEquipo({ params: paramsPromise }) {
   if (loading) return <div className="text-center py-20 text-gray-400">Cargando...</div>;
   if (!equipo) return <div className="text-center py-20 text-red-500">Equipo no encontrado.</div>;
  
+  // Si el reingreso se registro pero algun paso final fallo, reemplazamos el formulario por este aviso
+  // Asi el usuario no vuelve a registrar el mismo reingreso por error
+  if (avisosPostGuardado.length > 0) {
+    return (
+      <div className="max-w-3xl mx-auto">
+        <div className="bg-yellow-50 border border-yellow-300 rounded-xl p-6">
+          <p className="text-lg font-semibold text-yellow-800 mb-2">
+            ⚠️ El reingreso se registro, pero quedaron pasos pendientes
+          </p>
+          <p className="text-sm text-yellow-700 mb-4">
+            El registro del reingreso ya se guardo. No vuelvas a registrarlo.
+            Revisa lo siguiente en el equipo:
+          </p>
+          <ul className="text-sm text-yellow-800 space-y-2 mb-6 list-disc pl-5">
+            {avisosPostGuardado.map((a, i) => <li key={i}>{a}</li>)}
+          </ul>
+          <a href={`/equipos/${id}`}
+            className="inline-block px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors">
+            Ir al equipo
+          </a>
+        </div>
+      </div>
+    );
+  }
+ 
   const puedeReingreso = equipo.estado !== "En reserva";
+  const cantidadRegresan = perifericosEquipo.length - noRegresa.length;
  
   return (
     <div className="max-w-3xl mx-auto">
@@ -257,21 +370,46 @@ export default function ReingresaEquipo({ params: paramsPromise }) {
             </div>
           </div>
  
-          {/* SECCION 3: Perifericos que regresan */}
+          {/* SECCION 3: Perifericos que regresan con el equipo */}
           {perifericosEquipo.length > 0 && (
             <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
               <h2 className="text-lg font-semibold text-gray-700 mb-4 pb-2 border-b border-gray-100">
-                🖱 Perifericos vinculados al equipo
+                🖱 Perifericos que regresan con el equipo
               </h2>
-              <p className="text-sm text-gray-500 mb-3">
-                Estos perifericos estaban vinculados al equipo al momento de la entrega:
+              <p className="text-xs font-semibold text-gray-500 mb-1">
+                {cantidadRegresan} de {perifericosEquipo.length} regresan:
               </p>
-              <div className="flex flex-wrap gap-2">
-                {perifericosEquipo.map((p) => (
-                  <span key={p.id} className="text-xs bg-purple-50 text-purple-700 px-3 py-1.5 rounded-full">
-                    {p.tipo} - {p.marca} {p.serial ? `(${p.serial})` : ""}
-                  </span>
-                ))}
+              <p className="text-xs text-gray-400 mb-3">
+                Todos se consideran devueltos. Marca "No regreso" en los que falten; se desvincularan del equipo al confirmar.
+              </p>
+              <div className="space-y-2">
+                {perifericosEquipo.map((p) => {
+                  const falta = noRegresa.includes(p.id);
+                  return (
+                    <div key={p.id}
+                      className={`flex items-center justify-between rounded-lg px-3 py-2 border transition-colors ${
+                        falta ? "bg-red-50 border-red-200" : "bg-purple-50 border-purple-200"
+                      }`}>
+                      <div className={falta ? "opacity-60" : ""}>
+                        <span className={`text-xs font-semibold ${falta ? "text-red-600" : "text-purple-600"}`}>
+                          {p.tipo}
+                        </span>
+                        {/* Tachado cuando esta marcado como "No regreso" */}
+                        <p className={`text-sm ${falta ? "text-red-800 line-through" : "text-purple-800"}`}>
+                          {p.marca} {p.modelo || ""} {p.serial ? `(${p.serial})` : ""}
+                        </p>
+                      </div>
+                      <button type="button" onClick={() => alternarNoRegresa(p.id)}
+                        className={`text-xs font-medium ml-3 whitespace-nowrap px-3 py-1.5 rounded-lg transition-colors ${
+                          falta
+                            ? "bg-white border border-red-300 text-red-600 hover:bg-red-100"
+                            : "bg-white border border-gray-300 text-gray-600 hover:bg-gray-50"
+                        }`}>
+                        {falta ? "↩ Deshacer" : "No regreso"}
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -283,6 +421,9 @@ export default function ReingresaEquipo({ params: paramsPromise }) {
               <li>✅ El estado del equipo cambiara a <strong>En reserva</strong></li>
               <li>✅ Se registrara la devolucion de <strong>{equipo.usuario_actual || "usuario anterior"}</strong></li>
               <li>✅ El campo de usuario actual quedara como <strong>Sin usuario</strong></li>
+              {perifericosEquipo.length > 0 && (
+                <li>✅ Se guardaran en el historial de este ingreso los <strong>{cantidadRegresan}</strong> perifericos que regresan</li>
+              )}
               <li>✅ El equipo quedara disponible para una nueva salida</li>
             </ul>
           </div>
